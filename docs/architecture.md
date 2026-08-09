@@ -1,5 +1,7 @@
 # CodeFlow Agent 总体架构
 
+具体组件的需求、前后依赖、公开契约、错误恢复和验收标准见[组件需求设计索引](components/README.md)。
+
 ## 组件图
 
 ```mermaid

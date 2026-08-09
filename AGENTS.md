@@ -14,6 +14,15 @@ The product must make agent execution understandable and auditable without expos
 - Bind irreversible approvals to the exact operation parameters and current code version.
 - Preserve user changes and workspace boundaries.
 
+## Component task pickup
+
+Before implementing a component, read `docs/components/README.md`, the target component document, every listed hard-dependency document, and the referenced ADRs. Follow the dependency gates and requirement/acceptance IDs in those documents.
+
+- Do not change an upstream public contract only to make a downstream implementation easier.
+- If an upstream contract must change, update its component document and contract tests first, then audit every listed downstream consumer.
+- A component is not complete because an interface or placeholder exists. Satisfy its acceptance criteria with real evidence.
+- Keep deferred D2-D8 capabilities visibly deferred; do not add empty implementations to improve apparent coverage.
+
 ## Quality gates
 
 Run before handoff:
