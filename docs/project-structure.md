@@ -3,7 +3,7 @@
 ```text
 CodeFlow-Agent/
 ├─ .github/workflows/       # Windows CI
-├─ docs/                    # 架构、路线图和 ADR
+├─ docs/                    # 架构、路线图、组件需求设计和 ADR
 ├─ src/
 │  ├─ agent/                # Agent 动态循环与任务生命周期
 │  ├─ app/                  # 依赖组装和应用用例
