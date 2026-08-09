@@ -39,9 +39,46 @@ interface BudgetLimits {
   maxRetriesPerOperation: number;
   maxNoProgressCycles: number;
 }
+
+interface BudgetUsage {
+  steps: number;
+  toolCalls: number;
+  inputTokens: number;
+  outputTokens: number;
+  retries: number;
+  noProgressCycles: number;
+  activeDurationMs: number;
+  waitingDurationMs: number;
+  costUsd: number | null;
+  costStatus: "known" | "partial" | "unknown";
+}
+
+interface BudgetSnapshot {
+  schemaVersion: number;
+  sessionId: StableId;
+  usage: BudgetUsage;
+  reserved: Partial<BudgetUsage>;
+  limits: BudgetLimits;
+  pricingVersion: string | null;
+  updatedAt: UtcTimestamp;
+  lastLedgerSequence: number;
+}
+
+interface BudgetLedgerEntry {
+  schemaVersion: number;
+  entryId: StableId;
+  sessionId: StableId;
+  operationId: StableId;
+  idempotencyKey: string;
+  kind: "reserve" | "commit" | "release" | "adjust";
+  delta: Partial<BudgetUsage>;
+  createdAt: UtcTimestamp;
+}
 ```
 
 MVP 默认单任务最长 20 分钟、已验收任务平均不超过 1 美元；实现默认值必须由 config 提供，不能散落在循环中。
+
+`BudgetSnapshot` 是 C04 的唯一预算投影契约；C01 `budget.updated` context、C13 和 C15 必须使用同一结构或稳定引用，不能维护另一套四维含义。当前 C01/代码中的四维数值结构是过渡基线，C04 完成前必须扩展；未知费用始终是 `null + costStatus`，不能写成 0。
 
 ## 4. 功能需求
 
@@ -49,10 +86,12 @@ MVP 默认单任务最长 20 分钟、已验收任务平均不超过 1 美元；
 - `BUDGET-FR-002`：每次工具执行前预留一次 tool call；未开始执行的审批等待不重复计数。
 - `BUDGET-FR-003`：step 的定义是一次模型决策周期，不等同于每条流式事件。
 - `BUDGET-FR-004`：时间使用单调时钟，从 Session 开始到终态，等待用户时间单独记录并可配置是否计入。
-- `BUDGET-FR-005`：重试按 operation hash 计数；外部写 `UNKNOWN` 不允许自动重试。
+- `BUDGET-FR-005`：重试按稳定 operation ID 和 attempt 计数，并保存当时的 operation hash；外部写 `UNKNOWN` 不允许自动重试。
 - `BUDGET-FR-006`：无进展判定至少考虑重复 tool+input、重复错误和代码版本未变化。
 - `BUDGET-FR-007`：达到软阈值发 warning，达到硬阈值停止新调用并请求用户选择扩容或结束。
 - `BUDGET-FR-008`：预算更新产生事件，CLI 显示已用/上限/预估剩余。
+- `BUDGET-FR-009`：reserve/commit/release 使用调用方提供的幂等键；相同键和相同内容重复调用返回旧结果，内容不同返回完整性错误。
+- `BUDGET-FR-010`：每个 reservation 绑定稳定 operation ID，不使用可因参数规范化变化而改变的显示文本作为主键。
 
 ## 5. 并发与原子性
 
@@ -60,6 +99,7 @@ MVP 默认单任务最长 20 分钟、已验收任务平均不超过 1 美元；
 - 模型流中断仍记录已产生的 usage。
 - 预留成功但操作未开始时可释放；操作开始后由完成/失败结算。
 - 预算状态从事件或 usage ledger 恢复，不能只存在内存计数器。
+- C08 工具开始边界中的 reservation 与批准消费、operation 状态、`tool.started` 同事务；模型调用 reservation 则与 `model.started` 同事务。
 
 ## 6. 错误与恢复
 
@@ -84,6 +124,8 @@ MVP 默认单任务最长 20 分钟、已验收任务平均不超过 1 美元；
 - `BUDGET-AC-003`：重复相同失败达到阈值后停止，trace 指出首次和最后一次重复。
 - `BUDGET-AC-004`：恢复 Session 后剩余预算与崩溃前事件重放一致。
 - `BUDGET-AC-005`：CLI 在 1 秒内显示最新预算事件。
+- `BUDGET-AC-006`：未知、部分和已知费用可确定重放，任何报告都不会把 unknown 聚合为 0。
+- `BUDGET-AC-007`：reserve/commit/release 重放不会重复计费，幂等键冲突会显式失败。
 
 ## 9. 实现任务建议
 

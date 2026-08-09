@@ -3,7 +3,7 @@
 - 状态：只有 `createSession`；真实循环缺失
 - 目标阶段：D3–D4，D5–D7 接入 UI/持久化
 - 代码位置：`src/agent/agent-event-loop.ts`
-- 硬依赖：[C01](01-event-state.md)、[C03](03-permission-engine.md)、[C04](04-budget-controller.md)、[C05](05-model-adapter.md)、[C06](06-context-assembler.md)、[C08](08-tool-runtime.md)、[C09](09-built-in-tools.md)、[C10](10-completion-gate.md)
+- 硬依赖：[C01](01-event-state.md)、[C02](02-storage-artifacts.md)、[C03](03-permission-engine.md)、[C04](04-budget-controller.md)、[C05](05-model-adapter.md)、[C06](06-context-assembler.md)、[C08](08-tool-runtime.md)、[C09](09-built-in-tools.md)、[C10](10-completion-gate.md)
 - 下游消费者：C12、C13、C14、C15
 
 ## 1. 目标
@@ -29,7 +29,7 @@
 
 | 依赖 | 最低可用条件 | 未满足时 Loop 只能做什么 |
 | --- | --- | --- |
-| C01 | 生命周期、事件 writer、reducer 稳定 | 创建 Session |
+| C01/C02 | 生命周期、持久化事件 writer、reducer 和恢复查询稳定 | 创建内存 Session |
 | C03/C04 | 权限和 reserve/commit 预算 API | 不得执行工具/模型 |
 | C05 | 流式文本/tool call/usage 契约通过 fixtures | 不得进入真实模型循环 |
 | C06 | ContextManifest 和溢出策略 | 不得发送项目上下文 |
@@ -43,18 +43,22 @@
 ```ts
 while (!terminal) {
   assertNotCancelled();
-  await budget.reserveModelCall();
   const context = await contextAssembler.assemble(state);
-  const modelResult = await collect(model.stream(context));
-  await budget.commitModelUsage(modelResult.usage);
+  const modelCall = await modelJournal.begin({
+    contextManifest: context.manifest,
+    reservation: "model-call upper bound",
+    event: "model.started"
+  }); // reservation + model.started 同事务并持久化确认
+  const modelResult = await collect(model.stream({ ...context, ...modelCall.identity }));
+  await modelJournal.finish(modelCall, modelResult); // usage 结算 + model.completed
 
   publishVisiblePlanAndSummary(modelResult);
 
   if (modelResult.toolCalls.length > 0) {
     for (const call of scheduleSafely(modelResult.toolCalls)) {
       assertNotCancelled();
-      const result = await toolRuntime.execute(call);
-      appendToolObservation(result);
+      const result = await toolRuntime.execute(call); // C08 持久化 tool lifecycle
+      appendTranscriptObservation(result);            // 仅模型 transcript 投影
       if (result.status === "approval_required" || result.status === "unknown") pause();
     }
     continue;
@@ -67,6 +71,37 @@ while (!terminal) {
 ```
 
 伪代码表达调度边界，不限制模型对代码任务的具体探索方案。
+
+### 4.1 单步调度接口
+
+```ts
+interface AdvanceRequest {
+  sessionId: StableId;
+  expectedLastSequence: number;
+  trigger: "start" | "model_event" | "tool_result" | "user_answer" |
+           "approval_decision" | "reconcile_result" | "resume";
+  triggerId: StableId;
+}
+
+interface AdvanceResult {
+  sessionId: StableId;
+  lastSequence: number;
+  lifecycle: SessionLifecycle;
+  disposition: "continue" | "waiting" | "terminal" | "blocked";
+  pendingRequestId: StableId | null;
+}
+
+interface DurableModelCallJournal {
+  begin(input: ModelCallStart): Promise<ModelCallLease>;
+  finish(lease: ModelCallLease, result: CollectedModelResult): Promise<StableId>;
+  fail(lease: ModelCallLease, error: StructuredError, partialUsage: UsageRecord | null):
+    Promise<StableId>;
+}
+```
+
+`advance()` 是唯一调度入口；同一 trigger ID 幂等。一次调用最多启动一个新的模型调用或一个工具 operation，返回前必须把由该步产生的事实落盘。Loop 是 Session 的单写调度者，但工具 started/finished 由 C08 journal 权威写入，Loop 只消费结果并更新 transcript/下一步，不能重复追加工具生命周期事件。
+
+`DurableModelCallJournal.begin` 在一个 C02 事务中预留 C04 预算并追加 `model.started`，返回的 lease 包含 C05 所需 run/step/span/modelCall/attempt 身份。只有 begin 持久化确认后才允许发送模型网络请求；finish/fail 结算 usage 并追加唯一 `model.completed`。
 
 ## 5. 功能需求
 
@@ -82,6 +117,10 @@ while (!terminal) {
 - `LOOP-FR-010`：达到预算、无进展或协议错误时暂停而不是伪造失败/成功。
 - `LOOP-FR-011`：恢复由事件重放重建，不从内存闭包或 UI 文本恢复。
 - `LOOP-FR-012`：每轮捕获 config/tool/model/code version；变化触发上下文重建和旧批准失效。
+- `LOOP-FR-013`：ask/approval 请求使用稳定 request ID 和 resume token；相同 trigger/reply 重放只产生一次状态转换。
+- `LOOP-FR-014`：Runtime 的晚到结果按 operation ID 与 attempt 关联；旧 attempt 结果不得覆盖新 attempt，已终态 Session 收到晚到副作用结果时必须追加安全事实并重新进入 UNKNOWN/FAILED，而不是丢弃。
+- `LOOP-FR-015`：Runtime/Adapter 只翻译错误和给出 retry advice；是否重试由 Loop 单点决定并经 C04 reservation/no-progress 门，避免组件嵌套重试。
+- `LOOP-FR-016`：RuntimeEventLog 是事实源，ModelTranscriptProjection 只从已持久化事件生成；合成占位、摘要和 UI 文本不得反向成为事实。
 
 ## 6. 调度状态
 
@@ -113,6 +152,8 @@ idle
 | Storage | write failed | 停止新副作用，保留当前进程证据 |
 | Cancel | requested | CANCELLING → CANCELLED/UNKNOWN |
 
+模型和工具的 retry owner 均为 Loop；Adapter/Provider 不在内部再次发起完整业务调用。仅允许 Provider 在尚未发送请求体、尚未收到任何响应且协议明确幂等时做透明连接重建，并必须向 Loop 报告 attempt。
+
 ## 8. 并发与取消
 
 - 单 Session 单调度器；MVP 不运行多个 Agent actor。
@@ -131,6 +172,8 @@ idle
 - `LOOP-SR-003`：未持久化 started 事件前不开始外部副作用。
 - `LOOP-SR-004`：关键事件落库失败后停止新副作用。
 - `LOOP-SR-005`：不得以超预算、取消或工具失败为由跳过 CompletionGate。
+- `LOOP-SR-006`：每次外部调用前执行 safe-point；C08 commit fence 负责在持锁状态下再次核验 code/config/tool/approval/cancel/idempotency，Loop 不能用较早快照替代。
+- `LOOP-SR-007`：CompletionGateContext 必须从可信 repository/provider 组装；模型提交的 CompletionIntent 不能成为 trace、安全或验证事实源。
 
 ## 11. 验收标准
 
@@ -142,6 +185,9 @@ idle
 - `LOOP-AC-006`：预算、无进展、上下文溢出和模型断流均产生可定位首错 trace。
 - `LOOP-AC-007`：finish_task rejected 后继续修复，verified 后无新模型/工具调用。
 - `LOOP-AC-008`：Loop 代码中不存在按 TypeScript/Python/Go 分支的固定解题步骤。
+- `LOOP-AC-009`：相同 advance trigger、用户回答和批准决策重复投递不会追加重复事实或执行第二次副作用。
+- `LOOP-AC-010`：在模型 started、tool journal.begin、execute 返回和 finish 事务各切点杀进程，恢复不会盲重试未知副作用。
+- `LOOP-AC-011`：Adapter 报告两次 retryable failure 时总业务 attempt 不超过 Loop 配置上限，不发生 Adapter×Loop 嵌套倍增。
 
 ## 12. 实现任务建议
 

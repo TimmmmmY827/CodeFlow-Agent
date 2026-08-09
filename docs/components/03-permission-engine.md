@@ -39,19 +39,38 @@
 ## 4. 批准令牌
 
 ```ts
+interface OperationBinding {
+  bindingVersion: number;
+  sessionId: StableId;
+  taskId: StableId;
+  authorizationVersion: string;
+  toolName: string;
+  toolVersion: string;
+  inputSchemaHash: string;
+  normalizationVersion: string;
+  effectiveInputHash: string;
+  workspaceId: StableId;
+  codeVersion: string | null;
+  diffHash: string | null;
+  configVersion: string;
+}
+
 interface ApprovalToken {
   approvalId: StableId;
-  toolName: string;
   operationHash: string;
   expiresAt: UtcTimestamp;
 }
 
-operationHash = sha256(canonicalJson({ toolName, input, codeVersion }))
+operationHash = sha256(canonicalJson(operationBinding))
 ```
 
-这里的 `input` 是 `inputSchema` 解析后的最终值，不是模型发送的原始 JSON。当前 `ApprovalToken` 和 `PermissionContext` 已可编译；任务授权的 Session/Task/workspace/version 绑定、批准摘要和持久化消费仍是目标契约。
+`effectiveInputHash` 来自 C07 `inputSchema` 解析并执行版本化 normalization 后的最终参数，不是模型发送的原始 JSON。Session/Task/授权版本、工具版本、schema、normalization、workspace、代码/diff 和行为配置任一变化都使旧批准失效。只影响显示、不影响行为的 UI 配置不得进入 binding。
+
+当前可编译 `ApprovalToken` 仍含 toolName 且 hash 只覆盖 tool/input/codeVersion；上面的 `OperationBinding` 和精简 token 是目标契约。迁移必须先更新 operation-hash 契约测试，再审计 C07/C08/C09/C13。
 
 Runtime 在工具开始执行前消费 token。消费后即使工具失败也不得自动复用；外部写失败进入 `UNKNOWN` 并先对账。
+
+PermissionEngine 必须注入 C00 `Clock`，不得直接读取 `Date.now()`。`Date.parse(expiresAt) <= Date.parse(clock.utcNow())` 视为已经过期，解析失败为 deny，过期为重新请求批准；测试使用虚拟时钟覆盖等于边界和时钟前后跳变。
 
 ## 5. 功能需求
 
@@ -63,6 +82,8 @@ Runtime 在工具开始执行前消费 token。消费后即使工具失败也不
 - `PERM-FR-006`：批准消费必须最终持久化；崩溃后不得把已可能使用的令牌恢复为可用。
 - `PERM-FR-007`：策略拒绝无效日期、空 approval ID、未知工具和未注册风险。
 - `PERM-FR-008`：用户明确拒绝后记录 decision，模型不得自动重复询问相同操作。
+- `PERM-FR-009`：批准状态固定为 `issued -> approved|denied|expired`，且 `approved -> consumed|invalidated|expired`；denied/expired/consumed/invalidated 均为终态。只有 `approved` 能被消费，消费使用 approval ID 作为幂等键且不可逆。
+- `PERM-FR-010`：批准消费通过 C08 execution journal 与预算预留、operation started 和 `tool.started` 同事务提交；PermissionEngine 只判定，不自行打开数据库事务。
 
 ## 6. 时序
 
@@ -72,7 +93,8 @@ sequenceDiagram
     participant R as ToolRuntime
     participant P as PermissionEngine
     participant U as CLI/HITL
-    L->>R: tool + parsed input + codeVersion
+    L->>R: tool + requested input + snapshot
+    R->>R: parse + normalize -> OperationBinding
     R->>P: decide(operationHash)
     P-->>R: confirm
     R-->>L: approval_required
@@ -111,6 +133,8 @@ sequenceDiagram
 - `PERM-AC-003`：同一 approval ID 第二次使用被拒绝，包括第一次执行失败场景。
 - `PERM-AC-004`：崩溃恢复不会复活已经消费或状态不明的批准。
 - `PERM-AC-005`：提示注入 fixture 无法改变风险、授权或审批状态。
+- `PERM-AC-006`：Session/Task/authorization/tool/schema/normalization/workspace/diff/config 任一绑定字段变化都使旧批准失效。
+- `PERM-AC-007`：虚拟时钟覆盖无效、恰好过期、未过期和恢复后过期四种边界，测试不依赖真实时间。
 
 ## 10. 实现任务建议
 

@@ -4,7 +4,7 @@
 - 目标阶段：D3，预算压力优化延续至 D9
 - 代码位置：`src/context/context-assembler.ts`
 - 硬依赖：[C00](00-shared-contracts.md)、[C01](01-event-state.md)、[C05](05-model-adapter.md)、[C07](07-tool-registry.md)
-- 下游消费者：C05、C11、C15
+- 下游消费者：C11、C15
 
 ## 1. 目标
 
@@ -45,18 +45,61 @@
 ```ts
 interface AssembledContext {
   input: ModelInputItem[];
-  manifest: {
-    configVersion: string;
-    stablePrefixHash: string;
-    sourceRefs: ContextSourceRef[];
-    omitted: OmittedContextItem[];
-    estimatedTokens: number;
-    checkpointId: string | null;
-  };
+  manifest: ContextManifest;
+}
+
+interface ContextSourceRef {
+  sourceId: StableId;
+  kind: "system_rule" | "user_instruction" | "project_instruction" |
+        "event" | "artifact" | "file_range" | "tool_schema" | "checkpoint";
+  reference: string;
+  contentHash: string;
+  observedAt: UtcTimestamp;
+  sourceUpdatedAt: UtcTimestamp | null;
+  trust: "authoritative" | "user_authorized" | "project_data" | "external_untrusted";
+  freshness: "current" | "stale" | "unknown";
+  requested: boolean;
+  included: boolean;
+}
+
+interface OmittedContextItem {
+  sourceId: StableId;
+  reasonCode: "budget" | "duplicate" | "stale" | "sensitive" |
+              "out_of_scope" | "missing" | "lower_priority";
+  summary: string;
+}
+
+interface ContextManifest {
+  schemaVersion: number;
+  modelCallId: StableId;
+  generatedAt: UtcTimestamp;
+  reducerVersion: string;
+  configVersion: string;
+  toolCatalogHash: string;
+  codeSnapshot: CodeSnapshot;
+  stablePrefixHash: string;
+  sourceRefs: ContextSourceRef[];
+  omitted: OmittedContextItem[];
+  estimatedTokens: number;
+  checkpointId: StableId | null;
+}
+
+interface ContextSourceResolver {
+  resolve(ref: ContextSourceRef, signal: AbortSignal): Promise<ResolvedContextSource>;
+}
+
+interface ResolvedContextSource {
+  sourceId: StableId;
+  actualContentHash: string;
+  actualUpdatedAt: UtcTimestamp | null;
+  content: ModelInputItem[];
+  sensitivity: "normal" | "sensitive";
 }
 ```
 
 Manifest 进入 trace，用于回答“模型看到了什么、什么被省略、为什么”。不得记录原始秘密。
+
+Assembler 只通过注入的 `ContextSourceResolver` 读取已经由 Loop/权限边界选定的 event、Artifact 和文件范围引用；它不能自行调用 C09 工具、扩大文件范围或访问网络。resolver 返回实际 hash/时间后，Assembler 才能把 freshness 标为 current。requested 与 included 分开记录，使“模型请求但被安全/预算省略”可审计。
 
 ## 5. 功能需求
 
@@ -70,6 +113,9 @@ Manifest 进入 trace，用于回答“模型看到了什么、什么被省略�
 - `CTX-FR-008`：无法证明关键状态保留时返回 `context_compaction_unsafe`，请求用户处理。
 - `CTX-FR-009`：同一代码/指令版本生成稳定 prefix hash，支持缓存成本分析。
 - `CTX-FR-010`：每次请求记录 included/omitted source，不保存整份上下文副本作为普通 trace。
+- `CTX-FR-011`：每个 source 必须记录来源、内容 hash、观察时间、freshness 和 trust；摘要/检查点引用原事实且不能提升 trust。
+- `CTX-FR-012`：checkpoint 带独立 schema/reducer/config/tool/code 版本；未知主版本或关键来源缺失时不能用于自动恢复。
+- `CTX-FR-013`：manifest 对 source 采用稳定排序，requested、included、omitted 三者关系可机器校验且不存在未解释丢弃。
 
 ## 6. 预算分配
 
@@ -109,6 +155,8 @@ Manifest 进入 trace，用于回答“模型看到了什么、什么被省略�
 - `CTX-AC-004`：在多种 token 上限下，checkpoint 保留清单中的全部关键状态。
 - `CTX-AC-005`：Prompt injection fixture 无法改变权限、预算或秘密策略。
 - `CTX-AC-006`：ContextManifest 能解释每个输入 item 的来源和省略原因。
+- `CTX-AC-007`：来源在 assemble 前变化会得到 stale/changed 结果并重新解析，不复用旧 hash 对应摘要。
+- `CTX-AC-008`：模型请求越界文件或敏感 Artifact 时，manifest 保留 requested=true/included=false 和稳定省略原因，resolver 不读取正文。
 
 ## 10. 实现任务建议
 

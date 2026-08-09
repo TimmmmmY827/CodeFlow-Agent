@@ -46,24 +46,53 @@ C05 的 tool call 契约必须在 C11 开发真实循环前冻结；C06 依赖�
 
 ```ts
 interface ModelRequest {
+  runId: StableId;
+  stepId: StableId;
+  spanId: StableId;
+  modelCallId: StableId;
+  attempt: number;
   model: string;
   input: ModelInputItem[];
   tools: ModelToolDefinition[];
   reasoningEffort: "low" | "medium" | "high";
   maxOutputTokens: number;
-  continuation: ModelContinuation | null;
+  continuation: ModelContinuationHandle | null;
   signal: AbortSignal;
 }
 
 type ModelStreamEvent =
-  | { type: "response.started"; responseId: string }
-  | { type: "text.delta"; delta: string }
-  | { type: "tool_call.delta"; callId: string; name: string; argumentsDelta: string }
-  | { type: "tool_call.completed"; call: ModelToolCall }
-  | { type: "reasoning.continuation"; item: ModelContinuation }
-  | { type: "usage"; usage: UsageRecord }
-  | { type: "response.completed"; finishReason: string }
-  | { type: "response.failed"; error: StructuredError };
+  | (ModelEventIdentity & { type: "response.started"; responseId: string })
+  | (ModelEventIdentity & { type: "text.delta"; delta: string })
+  | (ModelEventIdentity & { type: "tool_call.delta"; callId: string; name: string; argumentsDelta: string })
+  | (ModelEventIdentity & { type: "tool_call.completed"; call: ModelToolCall })
+  | (ModelEventIdentity & { type: "reasoning.continuation"; handle: ModelContinuationHandle })
+  | (ModelEventIdentity & { type: "usage"; usage: UsageRecord; completeness: "partial" | "final" })
+  | (ModelEventIdentity & { type: "response.completed"; finishReason: string })
+  | (ModelEventIdentity & { type: "response.failed"; error: StructuredError; retryAdvice: RetryAdvice });
+
+interface ModelEventIdentity {
+  runId: StableId;
+  stepId: StableId;
+  spanId: StableId;
+  modelCallId: StableId;
+  attempt: number;
+  responseId: string | null;
+}
+
+interface ModelContinuationHandle {
+  handleId: StableId;
+  provider: string;
+  protocolVersion: string;
+  contentHash: string;
+}
+
+interface RetryAdvice {
+  allowed: boolean;
+  reasonCode: string;
+  retryAfterMs: number | null;
+  emittedCompleteToolCall: boolean;
+  usageCompleteness: "none" | "partial" | "final";
+}
 
 interface ModelAdapter {
   capabilities(): ModelCapabilities;
@@ -72,6 +101,8 @@ interface ModelAdapter {
 ```
 
 `ModelStreamEvent` 是 Adapter 与 Loop 之间的归一化运行时流，不与 `AgentEvent` 类型一一对应；C11 应聚合 delta，并按 C01 目录写入 `model.started`/`model.completed`，失败或取消由 completed 事实的 operation/error context 表达。
+
+Continuation handle 只引用 C14 敏感 transcript 中的 provider blob；普通事件、ContextManifest 和导出不保存原文。Adapter 通过注入的敏感记录 resolver 读取 handle，不允许核心层解释供应商 reasoning 数据。
 
 核心层只看归一化 item；DeepSeek/OpenAI SDK 原始对象只能在 Provider 内部出现。
 
@@ -85,7 +116,9 @@ interface ModelAdapter {
 - `MODEL-FR-006`：DeepSeek 服务端搜索默认不启用，避免绕过本地工具权限和 trace。
 - `MODEL-FR-007`：流式事件必须携带 response/span 关联信息，断流后能判断是否已有可见文本、完整 tool call 或未知 usage。
 - `MODEL-FR-008`：Adapter 暴露能力矩阵，不支持的参数在请求前拒绝或显式降级。
-- `MODEL-FR-009`：单次模型调用的自动重试上限为 2；只在没有产生不可安全重复的下游行为时重试。
+- `MODEL-FR-009`：Adapter 的一次 `stream` 调用只对应一个供应商业务 attempt，不自行执行完整请求重试；它返回稳定 retry advice，由 C11 在预算内决定是否创建下一 attempt，Session 默认上限为 2。
+- `MODEL-FR-010`：只有 `response.completed` 且 tool call 参数全部 completed 时聚合结果才是 complete；断流后的文本、tool call 和 usage 分别标记完整性，不能合并成伪造成功。
+- `MODEL-FR-011`：partial/final usage 使用 modelCallId+attempt 幂等结算；未知价格保持 `costUsd=null`，后续重新计价必须记录 pricing version 和 adjustment。
 
 ## 6. DeepSeek 配置
 
@@ -99,8 +132,8 @@ interface ModelAdapter {
 
 | category | 可重试 | 处理 |
 | --- | --- | --- |
-| `model_rate_limited` | 是 | 尊重 retry-after，预算允许时最多 2 次 |
-| `model_timeout` | 是 | 未产生完整 tool call 时可重试 |
+| `model_rate_limited` | 是 | 返回 retry-after 建议，由 C11 决定新 attempt |
+| `model_timeout` | 是 | 报告已产生的事件/usage，由 C11 判断是否可重试 |
 | `model_stream_interrupted` | 条件 | 保存已收到 item，默认暂停而非拼接猜测 |
 | `model_invalid_tool_call` | 否 | 记录原始 artifact，回到循环要求模型重规划 |
 | `model_auth_failed` | 否 | 请求用户配置，不输出 Key |
@@ -122,6 +155,8 @@ interface ModelAdapter {
 - `MODEL-AC-004`：reasoning 续接可完成工具调用后的下一轮，但普通 trace 导出找不到其原文。
 - `MODEL-AC-005`：Provider 错误全部映射为稳定 category；核心测试不 import SDK 类型。
 - `MODEL-AC-006`：至少一次受控真实 API smoke test 记录模型 ID、协议版本、usage 和成本。
+- `MODEL-AC-007`：Adapter fixture 证明单次 stream 最多发起一次供应商业务请求，重试次数不会与 C11 相乘。
+- `MODEL-AC-008`：每个流事件都有稳定 run/step/span/call/attempt 关联，晚到和跨 attempt 事件不会被错误聚合。
 
 ## 10. 实现任务建议
 

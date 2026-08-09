@@ -31,6 +31,7 @@
 interface ToolDefinition<I, O> {
   name: string;
   version: string;
+  normalizationVersion: string;
   description: string;
   risk: "automatic" | "task_authorized" | "single_confirmation" | "control";
   sideEffect: "none" | "workspace_write" | "external_write";
@@ -38,9 +39,50 @@ interface ToolDefinition<I, O> {
   inputSchema: ZodType<I>;
   outputSchema: ZodType<O>;
   availability: ToolAvailability;
+  normalizeInput(input: I): { effectiveInput: I; transformations: InputTransformation[] };
+  claimResources(input: I): ResourceClaim[];
   execute(input: I, context: ToolExecutionContext): Promise<O>;
 }
+
+interface ToolContractIdentity {
+  name: string;
+  version: string;
+  inputSchemaHash: string;
+  outputSchemaHash: string;
+  normalizationVersion: string;
+}
+
+interface InputTransformation {
+  field: string;
+  ruleCode: string;
+  beforeHash: string;
+  afterHash: string;
+}
+
+interface ResourceClaim {
+  key: string;
+  mode: "read" | "write";
+  scope: "workspace" | "path" | "repository" | "provider_object";
+}
+
+interface ToolAvailability {
+  available: boolean;
+  reasonCode: string | null;
+  message: string | null;
+  checkedAt: UtcTimestamp;
+}
+
+interface ToolCatalogManifest {
+  schemaVersion: number;
+  catalogHash: string;
+  tools: ToolContractIdentity[];
+  generatedAt: UtcTimestamp;
+}
 ```
+
+`normalizeInput` 只能做确定、无 I/O 的规范化，例如默认值、路径分隔符和稳定排序；不得在这里读取工作区或网络。每次变化必须提高 `normalizationVersion`。`InputTransformation` 记录字段、规则 code 和 before/after hash，不在普通 trace 中保存秘密原值。
+
+`ResourceClaim` 至少包含稳定资源 key、`read|write` 模式和作用域；C08 只根据这些声明判断并行，不从自然语言描述猜测冲突。
 
 ### 3.2 当前可编译基线
 
@@ -56,6 +98,9 @@ interface ToolDefinition<I, O> {
 - `REG-FR-006`：工具可因 OS、Git 仓库、gh 登录或 API Key 缺失而 unavailable；不可用原因进入 manifest。
 - `REG-FR-007`：MVP 启动时一次性注册固定目录，运行中不从仓库/网页动态加载代码。
 - `REG-FR-008`：目录 hash 进入 configVersion，Session 恢复时发现变化必须重新确认上下文。
+- `REG-FR-009`：Registry 为每个工具生成 canonical input/output schema hash；模型投影、Runtime 和审批绑定必须引用同一 `ToolContractIdentity`。
+- `REG-FR-010`：availability 使用稳定 reason code（如 `os_unsupported`、`not_git_repository`、`credential_missing`、`provider_unreachable`）和可显示 message；reason code 进入 manifest，探测不得产生副作用。
+- `REG-FR-011`：工具必须声明资源集合；无法静态或确定计算资源时按冲突处理并串行执行。
 
 ## 5. 合法组合
 
@@ -88,6 +133,8 @@ interface ToolDefinition<I, O> {
 - `REG-AC-003`：Model tool 列表与 Runtime registry 名称/schema hash 一致。
 - `REG-AC-004`：Windows、非 Git 目录、未登录 gh、缺少 Exa Key 的 availability 正确。
 - `REG-AC-005`：恢复旧工具版本的 Session 得到可解释阻止信息。
+- `REG-AC-006`：schema 或 normalization 变化会改变工具契约/目录 hash，并使旧 operation/approval 绑定失效。
+- `REG-AC-007`：资源 claim 表驱动测试证明冲突写入不并行，互不冲突只读调用才可并行。
 
 ## 9. 实现任务建议
 

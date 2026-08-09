@@ -17,7 +17,7 @@
 - 配置加载、验证、版本 hash 和数据目录选择。
 - 生产/测试依赖组装、启动顺序和优雅关闭。
 - 注册固定工具目录并验证能力/策略。
-- 暴露 run/resume/list/trace/config/eval 用例。
+- 暴露 run/resume/list/config 用例；C14 提供 trace/export/delete/pin，C15 提供 eval，避免 Application 与下游治理组件形成类型循环。
 - 进程级锁、全局取消和未捕获错误转结构化事件。
 
 ### 明确不负责
@@ -56,14 +56,61 @@ interface CodeFlowApplication {
   run(request: RunTaskRequest): Promise<SessionHandle>;
   resume(sessionId: StableId): Promise<SessionHandle>;
   listSessions(filter: SessionFilter): Promise<SessionSummary[]>;
-  getTrace(sessionId: StableId, options: TraceOptions): AsyncIterable<TraceItem>;
   updateConfig(patch: ConfigPatch): Promise<ConfigUpdateResult>;
-  evaluate(request: EvaluationRequest): Promise<EvaluationRun>;
   shutdown(reason: string): Promise<void>;
+}
+
+interface RunTaskRequest {
+  requestId: StableId;
+  workspace: PathReference;
+  goal: string;
+  acceptanceCriteria: string[];
+  budget: BudgetLimits;
+  taskWriteAuthorized: boolean;
+}
+
+interface SessionHandle {
+  sessionId: StableId;
+  streamEvents(options: { afterSequence: number; signal: AbortSignal }):
+    AsyncIterable<AgentEvent>;
+  answer(requestId: StableId, answer: UserAnswer): Promise<CommandReceipt>;
+  decideApproval(requestId: StableId, decision: ApprovalDecision): Promise<CommandReceipt>;
+  cancel(requestId: StableId, reason: string): Promise<CommandReceipt>;
+  waitForTerminal(signal: AbortSignal): Promise<SessionSummary>;
+}
+
+interface CommandReceipt {
+  commandId: StableId;
+  accepted: boolean;
+  resultingSequence: number | null;
+  error: StructuredError | null;
+}
+
+interface UserAnswer {
+  value: string;
+  selectedChoiceId: string | null;
+}
+
+interface ApprovalDecision {
+  decision: "approved" | "denied";
+  operationHash: string;
+}
+
+interface ConfigPatch {
+  expectedConfigVersion: string;
+  values: JsonObject; // 仅允许 AppConfig schema 中的非秘密字段
+}
+
+interface ConfigUpdateResult {
+  configVersion: string;
+  changedFields: string[];
+  restartRequired: boolean;
 }
 ```
 
-SessionHandle 提供事件流、用户答复、审批决策、取消和最终状态；CLI 不直接持有 Loop 内部对象。
+这些 DTO 的所有者是 C12；`SessionFilter`、`SessionSummary` 和 Workspace/Session 记录从 C02 导入，不能重定义。SessionHandle 不暴露 Loop、repository 或 Provider。`requestId/commandId` 是幂等键：重复提交相同内容返回旧 receipt，不同内容冲突则拒绝。
+
+`streamEvents(afterSequence)` 必须由持久 EventStore 提供 replay-then-tail 语义：先建立受 sequence 保护的订阅游标，再补齐历史，最后无缝切换实时事件。慢消费者使用持久 sequence 重连；内存缓冲达到上限时断开并返回最后成功 sequence，不得阻塞事件写入。
 
 ## 5. 功能需求
 
@@ -76,10 +123,13 @@ SessionHandle 提供事件流、用户答复、审批决策、取消和最终状
 - `APP-FR-007`：resume 先重放和对账 unknown，再允许新调用。
 - `APP-FR-008`：shutdown 先停止接收新命令，再取消/等待活动 Session，最后关闭存储。
 - `APP-FR-009`：未捕获错误写入结构化失败事件；存储不可用时至少输出本地诊断，不伪造已保存。
+- `APP-FR-010`：应用生命周期固定为 `new -> starting -> ready -> stopping -> stopped|failed`；非 ready 状态拒绝新的 run/resume。
+- `APP-FR-011`：启动阶段每成功创建一个资源就登记对应关闭动作；后续失败按逆序回滚，回滚失败进入诊断但不能把应用标为 ready。
+- `APP-FR-012`：同一 Session 只允许一个可写调度 lease；多个 SessionHandle 可读，但 answer/approval/cancel 必须经 request ID 和当前待处理请求校验。
 
 ## 6. 配置模型
 
-至少包含：模型/provider、reasoning、预算、权限默认值、数据目录、保留期、搜索 Provider、工具超时/输出上限、UI 偏好。配置导出永不包含 Key。
+至少包含：模型/provider、reasoning、预算、权限默认值、数据目录、保留期、搜索 Provider、工具超时/输出上限、UI 偏好。配置分为可序列化 `AppConfig` 与不可序列化 `CredentialProvider`；前者只保存 credential reference/availability，不包含 Key、token 或 Authorization header。
 
 `configVersion` 必须由影响行为的非秘密配置和工具目录共同计算。
 
@@ -108,6 +158,9 @@ SessionHandle 提供事件流、用户答复、审批决策、取消和最终状
 - `APP-AC-004`：两个实例争用 data dir 不产生并发写。
 - `APP-AC-005`：shutdown 期间不再接受新 Session，活动调用收到取消。
 - `APP-AC-006`：核心组件测试不直接读取 `process.env`。
+- `APP-AC-007`：每个启动阶段故障注入后已创建资源按逆序关闭，应用不接受命令且数据锁不会泄漏。
+- `APP-AC-008`：慢订阅者断开重连后按 sequence 收到无遗漏、无重复的事件，且不会阻塞 Loop。
+- `APP-AC-009`：answer/approval/cancel 重复投递幂等，错误 request ID 不能影响当前等待状态。
 
 ## 10. 实现任务建议
 

@@ -3,8 +3,8 @@
 - 状态：只有 `finish_task` 工厂；其余待实现
 - 目标阶段：D3–D6
 - 代码位置：建议 `src/tools/builtin/`、`src/providers/`
-- 硬依赖：[C00](00-shared-contracts.md)、[C02](02-storage-artifacts.md)、[C03](03-permission-engine.md)、[C07](07-tool-registry.md)、[C08](08-tool-runtime.md)
-- 下游消费者：C10、C11、C13、C15
+- 硬依赖：[C00](00-shared-contracts.md)、[C02](02-storage-artifacts.md)、[C03](03-permission-engine.md)、[C07](07-tool-registry.md)、[C08](08-tool-runtime.md)；`finish_task` 切片额外依赖 [C10](10-completion-gate.md)
+- 下游消费者：C11、C13、C15
 
 ## 1. 目标
 
@@ -47,10 +47,10 @@ Provider 管理 OS/SDK/CLI 细节；ToolDefinition 管理模型可见 schema；T
 | 14 | `finish_task` | control | none | safe | D4 |
 | 15 | `web_search` | automatic | none | safe | D6 |
 | 16 | `web_fetch` | automatic | none | safe | D6 |
-| 17 | `prepare_git_publish` | single_confirmation | none | safe | D6 |
+| 17 | `prepare_git_publish` | automatic | none | safe | D6 |
 | 18 | `commit_push_create_pr` | single_confirmation | external_write | reconcile | D6 |
 
-`prepare_git_publish` 本身只读，但归入发布审批流程：它生成绑定参数和批准摘要，不执行 commit/push/PR。
+`prepare_git_publish` 是受 Runtime 管理的只读准备操作，不要求预先批准；它生成并持久化不可变 PublishPlan 及批准摘要，不执行 commit/push/PR。只有 `commit_push_create_pr` 需要 `single_confirmation`，从而避免“先批准才能生成批准内容”的循环。
 
 ## 4. 共享工具要求
 
@@ -162,7 +162,7 @@ output: { acceptedRevision: number }
 
 ### `finish_task`
 
-输入使用 C10 CompletionClaim；输出为 verified/rejected 及原因。
+输入使用 C10 `CompletionIntent`，只包含模型总结、观察到的版本和证据引用；输出为 C10 根据可信 `CompletionGateContext` 计算的 verified/rejected 及原因。
 
 - 必须注入真实 CodeSnapshotProvider。
 - rejected 不终止 Session，Loop 回 RUNNING 并展示缺失证据。
@@ -263,25 +263,48 @@ output: { finalUrl: string; status: number; mediaType: string;
 ```ts
 input:  { remote: string; baseBranch: string; headBranch: string;
           commitMessage: string; prTitle: string; prBody: string }
-output: PublishPlan // HEAD, status, diffHash, remote URL, existing PR, operationHash
+output: PublishPlan // planId/version/hash, HEAD, status, diffHash, remote URL, existing PR
+```
+
+```ts
+interface PublishPlan {
+  schemaVersion: number;
+  planId: StableId;
+  sessionId: StableId;
+  planHash: string;
+  tool: ToolContractIdentity;
+  workspaceId: StableId;
+  codeSnapshot: CodeSnapshot;
+  remoteUrl: string;
+  baseBranch: string;
+  headBranch: string;
+  includedPaths: string[];
+  commitMessage: string;
+  prTitle: string;
+  prBodyHash: string;
+  existingPrUrl: string | null;
+  createdAt: UtcTimestamp;
+  expiresAt: UtcTimestamp;
+}
 ```
 
 - 只读检查 Git/gh 登录、remote、分支、用户改动、秘密扫描和现有 PR。
-- 输出绑定最终参数的批准摘要，不执行 add/commit/push/PR。
+- 输出绑定最终参数、tool/schema/normalization、workspace/code/diff/config 版本的批准摘要，不执行 add/commit/push/PR。
+- PublishPlan 以不可变控制记录写入 C02；返回模型的是 plan ID、plan hash 和脱敏摘要，不能由 commit 工具信任调用方回传的 plan 正文。
 - 工作树或参数变化后 plan 失效，必须重新 prepare。
 
 ### `commit_push_create_pr`
 
 ```ts
-input:  { plan: PublishPlan; approvalId: string }
+input:  { publishPlanId: StableId; planHash: string; approvalId: StableId }
 output: { commitSha: string; remoteBranch: string; prUrl: string;
           reconciliation: "confirmed" }
 ```
 
-- Runtime 校验 operation hash 和一次性批准后执行。
+- Runtime 从可信存储读取 PublishPlan，校验 plan hash、当前 commit/diff/config/tool contract 和一次性批准后执行。
 - 只暂存 plan 明确列出的路径；不使用 force push，不自动 merge。
 - 任一网络响应丢失时返回 unknown；恢复先查本地 commit、远端 branch 和现有 PR。
-- 重复执行相同 plan 必须返回既有真实结果，不创建重复 PR。
+- idempotency key 绑定 publishPlanId、tool version、remote、branch、commit message 和 PR 身份；重复执行相同 plan 必须返回既有真实结果，不创建重复 PR。
 
 ## 10. 工具实现依赖门
 

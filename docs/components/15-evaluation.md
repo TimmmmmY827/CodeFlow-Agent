@@ -54,9 +54,72 @@ interface EvaluationTask {
   forbiddenActions: string[];
   limits: BudgetLimits;
 }
+
+interface FixtureRef {
+  fixtureId: StableId;
+  version: string;
+  snapshotHash: string;
+  resetCommandId: string;
+}
+
+interface VerifierRef {
+  verifierId: StableId;
+  version: string;
+  artifactHash: string;
+  kind: "test" | "build" | "static" | "safety" | "trace";
+}
+
+interface EvaluationRunManifest {
+  schemaVersion: number;
+  runId: StableId;
+  taskId: string;
+  taskVersion: string;
+  applicationCommit: string;
+  configVersion: string;
+  modelId: string;
+  modelProtocolVersion: string;
+  toolCatalogHash: string;
+  fixture: FixtureRef;
+  verifiers: VerifierRef[];
+  environment: Record<string, string>;
+  isolation: "logical_workspace_boundary" | "sandboxed";
+  startedAt: UtcTimestamp;
+}
+
+interface VerifierResult {
+  verifierId: StableId;
+  status: "passed" | "failed" | "not_run" | "infrastructure_failed";
+  evidence: ArtifactReference | null;
+  codeVersion: string;
+  durationMs: number;
+  error: StructuredError | null;
+}
+
+interface EvaluationResult {
+  schemaVersion: number;
+  runId: StableId;
+  taskId: string;
+  status: "passed" | "product_failed" | "safety_failed" |
+          "provider_failed" | "harness_failed" | "environment_failed" | "cancelled";
+  verifierResults: VerifierResult[];
+  safetyVetoRefs: StableId[];
+  traceIntegrityRef: StableId;
+  completionDecisionRef: StableId;
+  budget: BudgetSnapshot;
+  durationMs: number;
+  firstErrorEventId: StableId | null;
+  attributedComponents: string[];
+}
+
+interface EvaluationRun {
+  manifest: EvaluationRunManifest;
+  result: EvaluationResult;
+}
 ```
 
 任务版本或验证器变化后不能直接与旧 run 横向比较。
+
+`safetyVetoRefs` 必须解析到 C10 可信 SafetyVeto/事件，`traceIntegrityRef` 必须解析到 C01/C14 机器报告；自然语言标签和模型自报 traceComplete 不能进入发布门。报告需同时保存原始样本数、有效产品样本数、各指标分母和置信区间/离散度，不能只展示均值。
 
 ## 5. 验证职责
 
@@ -91,6 +154,9 @@ Judge 不能推翻测试失败、安全否决、trace 缺失或 CompletionGate r
 - `EVAL-FR-007`：每个失败标注 failure category、首次错误、根因、恢复与所属组件。
 - `EVAL-FR-008`：确认的 bad case 自动生成轨迹前缀测试和端到端回归任务。
 - `EVAL-FR-009`：报告同时列出未运行、基础设施失败和产品失败，不能都算失败或都忽略。
+- `EVAL-FR-010`：发布门是版本化纯函数，输入只接受上述可信结果；每个阈值产生独立 pass/fail/unknown reason，不能短路丢失其他失败原因。
+- `EVAL-FR-011`：费用 unknown/partial 时成本门为 unknown 并阻止正式发布；允许在协议故障测试中排除成本指标，但必须从发布样本分母中显式区分。
+- `EVAL-FR-012`：failure attribution 保存规则版本、首次错误证据、主组件和可选相关组件；LLM 归因只能作为辅助，不能覆盖确定性分类。
 
 ## 7. 发布门槛
 
@@ -104,6 +170,8 @@ Judge 不能推翻测试失败、安全否决、trace 缺失或 CompletionGate r
 
 任何安全否决触发都不能由平均分抵消。
 
+发布门函数必须逐项实现本节全部阈值：任务数/一次通过数、语言覆盖、OpenCode 差距、安全、trace、单任务时长、平均/总成本、UX 均值与差值、取消时限。任一必需指标为 unknown 时整体不能通过；报告仍返回全部门槛结果供定位。
+
 ## 8. 环境与隔离
 
 - fixture 工作目录位于临时根下，每次从可信快照复制/checkout。
@@ -111,6 +179,8 @@ Judge 不能推翻测试失败、安全否决、trace 缺失或 CompletionGate r
 - 外部 API 可用真实调用做最终基线，用录制 fixture 做协议故障测试。
 - 隐藏验证器在 Agent 无法修改的路径执行。
 - 当前 Windows 用户运行不等于强沙盒；fixture 必须是可信代码。
+
+`logical_workspace_boundary` 只表示工具和工作目录不向 Agent 暴露 verifier 路径，不声称能抵抗同一 Windows 用户下的恶意原生代码。该模式只运行受信 fixture，`run_command` 仍执行 workspace/环境 allowlist。只有具备独立 OS 身份、虚拟机或等价强隔离并通过逃逸测试时才能标记 `sandboxed`；两种隔离等级的结果不得混作同一安全基线。
 
 ## 9. 错误分类
 
@@ -131,6 +201,7 @@ Judge 不能推翻测试失败、安全否决、trace 缺失或 CompletionGate r
 - `EVAL-SR-002`：评估报告和 trace 在发布前做秘密扫描。
 - `EVAL-SR-003`：OpenCode 对照获得相同任务权限，不给任一方额外信息。
 - `EVAL-SR-004`：Judge prompt 和结果版本化并可审计。
+- `EVAL-SR-005`：run manifest 的 environment 只允许记录审核过的工具/OS 版本键；环境变量值、路径中的用户秘密和凭证不得进入 manifest。
 
 ## 11. 验收标准
 
@@ -140,6 +211,8 @@ Judge 不能推翻测试失败、安全否决、trace 缺失或 CompletionGate r
 - `EVAL-AC-004`：同一固定 run 重放得到相同规则结果。
 - `EVAL-AC-005`：报告包含任务级证据链接、组件归因、成本和对照差异。
 - `EVAL-AC-006`：发布门函数覆盖所有阈值和安全否决组合。
+- `EVAL-AC-007`：每个发布阈值分别构造失败和 unknown fixture，证明成本 unknown、语言缺项、取消超时或 UX 样本不足均不能误通过。
+- `EVAL-AC-008`：报告明确区分 raw/effective sample size、基础设施排除项和隔离等级，并能追溯到 manifest/verifier/evidence 版本。
 
 ## 12. 实现任务建议
 

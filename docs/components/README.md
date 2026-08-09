@@ -35,9 +35,9 @@
 | C05 | [ModelAdapter](05-model-adapter.md) | D2 | 最小非流式实现 | C00、C01 | Context、Loop、成本账本 |
 | C06 | [ContextAssembler](06-context-assembler.md) | D3 | 排序骨架 | C00、C01、C05、C07 | Model、Loop |
 | C07 | [ToolDefinition 与 ToolRegistry](07-tool-registry.md) | D1–D3 | 基础实现 | C00 | Runtime、Context、Loop |
-| C08 | [ToolRuntime](08-tool-runtime.md) | D3–D4 | 基础流水线；版本/输出 schema 等缺失 | C00、C02、C03、C07 | 内置工具、Loop、Trace |
-| C09 | [18 个内置工具与外部 Provider](09-built-in-tools.md) | D3–D6 | 仅 `finish_task` 工厂 | C00、C02、C03、C07、C08 | Loop、Completion、CLI |
-| C10 | [CompletionGate](10-completion-gate.md) | D4 | 基础 Gate；完整 evidence/reason 契约缺失 | C00、C01、C02、C09 | Loop、CLI、Eval |
+| C08 | [ToolRuntime](08-tool-runtime.md) | D3–D4 | 基础流水线；版本/输出 schema 等缺失 | C00–C04、C07（不含 C05/C06） | 内置工具、Loop、Trace |
+| C09 | [18 个内置工具与外部 Provider](09-built-in-tools.md) | D3–D6 | 仅 `finish_task` 工厂 | C00、C02、C03、C07、C08；finish 依赖 C10 | Loop、CLI、Eval |
+| C10 | [CompletionGate](10-completion-gate.md) | D4 | 旧版 Gate；可信 Context/evidence 缺失 | C00、C01、C02 | 内置 finish、Loop、CLI、Eval |
 | C11 | [AgentEventLoop](11-agent-event-loop.md) | D3–D4 | 仅创建 Session | C01–C10 | Application、CLI、Eval |
 | C12 | [Application Service](12-application-service.md) | D3–D7 | 基础依赖组装 | C02–C11 | CLI、Session 命令、Eval |
 | C13 | [CLI/TUI 与 HITL](13-cli-tui.md) | D5 | 命令骨架 | C01、C03、C04、C11、C12、C14 | 用户、Eval |
@@ -58,12 +58,14 @@ flowchart LR
     C05 --> C06
     C07 --> C06
     C02 --> C08["C08 ToolRuntime"]
+    C01 --> C08
     C03 --> C08
+    C04 --> C08
     C07 --> C08
     C08 --> C09["C09 内置工具/Provider"]
-    C09 --> C10["C10 CompletionGate"]
-    C01 --> C10
+    C01 --> C10["C10 CompletionGate"]
     C02 --> C10
+    C10 --> C09
     C01 --> C11["C11 AgentEventLoop"]
     C03 --> C11
     C04 --> C11
@@ -72,6 +74,7 @@ flowchart LR
     C08 --> C11
     C09 --> C11
     C10 --> C11
+    C02 --> C11
     C02 --> C12["C12 Application"]
     C11 --> C12
     C01 --> C14["C14 Session/Trace"]
@@ -126,11 +129,40 @@ flowchart LR
 - 文档中的验收项有真实证据；未运行的验证必须明确标记。
 - 没有把 D2–D8 延后能力用空实现标记为完成。
 
+## 跨组件权威来源
+
+组件可以投影、缓存或摘要其他组件的数据，但安全决策必须回到下表的权威来源。模型输出、仓库/网页文本、UI 状态、observer 通知和 LLM Judge 均不是授权或事实来源。
+
+| 事实 | 唯一权威来源 | 允许的派生消费者 |
+| --- | --- | --- |
+| 事件顺序与生命周期事实 | C01 schema/reducer + C02 durable EventStore | C06、C11、C13–C15 |
+| Workspace/Session/Artifact/删除收据 | C02 versioned repository | C08、C10、C12、C14、C15 |
+| 授权与批准状态 | C03 policy + approval repository | C08、C11、C13、C14 |
+| 预算消费与剩余量 | C04 ledger/snapshot | C01、C08、C11、C13、C15 |
+| 模型协议事件 | C05 normalized stream；持久事实由 C11 写 C01 | C06、C11、C14 |
+| 模型实际看到的上下文 | C06 ContextManifest | C11、C14、C15 |
+| 工具版本/schema/availability | C07 ToolCatalogManifest | C03、C06、C08、C11、C15 |
+| 工具 operation 与副作用状态 | C08 durable execution journal | C01、C10、C11、C14、C15 |
+| 完成证据与安全否决 | C10 CompletionGateContext 的可信 Provider | C11、C13、C15 |
+| Session 恢复/导出/删除治理 | C14 基于 C01/C02 的派生服务 | C13、C15 |
+| 评估结果与发布门 | C15 versioned manifest/verifier/result | 发布决策 |
+
+详见 [ADR-0003](../decisions/0003-trusted-facts-and-durable-side-effects.md)。
+
+## 运行记录与故障切点约定
+
+- 每个顶层持久记录独立带主版本；接口示例中未写出的版本字段不得据此省略。
+- 不可逆操作固定使用 prepare、durable begin、execute、durable finish/reconcile；未落盘 started 不得开始副作用。
+- operation ID、attempt、operation hash、idempotency key 和 provider external ID 含义不同，禁止复用一个字符串代替。
+- 涉及数据库、文件或外部 Provider 的组件必须列出可注入崩溃切点，以及每个切点恢复后的合法状态集合。
+- `UNKNOWN` 不是普通失败或可重试状态，只能通过可信只读对账转为 applied/not_applied，或保持阻塞。
+
 ## 变更控制
 
 - 修改 C00、C01、C03、C07 的公共契约属于高影响变更，必须检查所有下游文档和测试。
 - 新增工具必须同时更新 C09 工具清单、权限级别、side-effect/retry 策略和 Context 工具 schema。
 - 新增事件必须更新 C01 状态投影、C02 持久化、C13 UI 表示和 C15 trace 完整性检查。
 - 新增外部写操作必须定义 prepare/commit、批准绑定、幂等键、状态查询和 `UNKNOWN` 对账。
+- 修改权威来源、持久执行边界或 CompletionGate 信任模型必须新增 ADR；不得只修改某个下游调用示例。
 
 新组件文档应从 [组件文档模板](component-design-template.md)复制结构。

@@ -3,7 +3,7 @@
 - 状态：输入校验、权限、hash、执行、JSON 边界和 Artifact 外置基础已实现；toolVersion、outputSchema、timeout、预算/事件持久化和故障恢复缺失
 - 目标阶段：D3–D4
 - 代码位置：`src/tools/tool-runtime.ts`
-- 硬依赖：[C00](00-shared-contracts.md)、[C02](02-storage-artifacts.md)、[C03](03-permission-engine.md)、[C07](07-tool-registry.md)
+- 硬依赖：[C00](00-shared-contracts.md)、[C01](01-event-state.md)、[C02](02-storage-artifacts.md)、[C03](03-permission-engine.md)、[C04](04-budget-controller.md)、[C07](07-tool-registry.md)
 - 下游消费者：C09、C11、C14、C15
 
 ## 1. 目标
@@ -19,7 +19,7 @@
 - 建 ToolExecutionContext，执行工具并遵守 AbortSignal/timeout。
 - 输出统一 ToolResultEnvelope；长结果写 ArtifactStore。
 - 根据 sideEffect/retry policy 产生 failed/cancelled/unknown。
-- 发出可转换为 AgentEvent 的 started/finished 生命周期。
+- 通过持久化 execution journal 写入权威 started/finished 事实；observer 只用于非权威通知。
 
 ### 明确不负责
 
@@ -43,21 +43,69 @@ lookup -> validate input -> canonical operation hash -> cancellation check
 ```text
 lookup
  -> validate input
- -> canonical operation hash
+ -> normalize input + transformation ledger
+ -> allocate operation ID / compute versioned operation hash
  -> permission decision
- -> budget reservation（由 Loop 注入/协调）
- -> cancellation check
- -> consume approval
- -> emit started
+ -> acquire resource/workspace lock
+ -> journal.begin transaction:
+      commit fence(snapshot/config/tool/approval/cancel/idempotency)
+      + consume approval
+      + reserve budget
+      + persist operation=started
+      + append tool.started
+ -> require durable begin acknowledgement
  -> execute with timeout
  -> validate output
  -> inline or ArtifactStore
  -> classify side effect
- -> emit finished
+ -> journal.finish transaction: settle budget + operation terminal + append finished
  -> return envelope
 ```
 
-目标顺序是安全契约。尤其批准必须绑定解析后的最终输入，并在副作用开始前完成事务性消费。
+目标顺序是安全契约。Runtime 是工具生命周期事件的唯一写入者，Loop 不得再写一份 `tool.started/completed/failed`。`journal.begin` 由 C08 定义端口、C02 提供 SQLite adapter；只有它返回 durable acknowledgement 后才能调用 `execute`。对于 workspace write，资源锁从 commit fence 前一直持有到 finish，避免 started 落盘后代码版本立即漂移。
+
+```ts
+interface PreparedToolOperation<I> {
+  sessionId: StableId;
+  runId: StableId;
+  spanId: StableId;
+  toolCallId: StableId;
+  operationId: StableId;        // 一次逻辑操作的稳定身份
+  attempt: number;
+  tool: ToolContractIdentity;
+  requestedInputHash: string;
+  effectiveInput: I;            // 仅运行时持有
+  effectiveInputHash: string;
+  transformations: InputTransformation[];
+  operationHash: string;        // 批准/版本绑定，不作为数据库主键
+  resourceClaims: ResourceClaim[];
+  snapshot: CodeSnapshot;
+  idempotencyKey: string;
+}
+
+interface DurableToolExecutionJournal {
+  begin(operation: PreparedToolOperation<unknown>, approvalId: StableId | null):
+    Promise<{ startedEventId: StableId; reservationId: StableId }>;
+  finish(result: ToolResultEnvelope<unknown>): Promise<{ finishedEventId: StableId }>;
+  requestCancellation(operationId: StableId, at: UtcTimestamp): Promise<void>;
+}
+
+type DurableToolOperationState =
+  | "prepared"
+  | "started"
+  | "cancel_requested"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "unknown"
+  | "compensated";
+```
+
+`operationId` 跨恢复保持不变，attempt 每次安全重试递增；`operationHash` 随有效参数或绑定版本变化。外部操作的 idempotency key 绑定 caller、tool version、业务对象和 effective input，不得只使用随机 request ID。
+
+合法状态转换为 `prepared -> started -> succeeded|failed|cancelled|unknown`，`started -> cancel_requested -> cancelled|succeeded|failed|unknown`，以及 `unknown -> succeeded|failed|compensated|unknown`（只允许可信对账推动）。终态结果晚到时只能追加 reconciliation 事实，不能覆盖历史记录。
+
+journal 只能写 C01 已登记的事件：succeeded 映射 `tool.completed`；failed/cancelled 映射带结构化 error/cancellation context 的 `tool.failed`；unknown 追加 `operation.unknown`。不得为内部 state 发明 `tool.cancelled`、`tool.succeeded` 等新事件名。
 
 ## 4. 结果信封
 
@@ -83,13 +131,20 @@ interface ToolResultEnvelope {
 
 ```ts
 interface ToolResultEnvelope<O = unknown> {
+  sessionId: StableId;
+  runId: StableId;
+  spanId: StableId;
+  toolCallId: StableId;
+  operationId: StableId;
+  attempt: number;
   toolName: string;
   toolVersion: string;
   operationHash: string;
   status: "completed" | "failed" | "approval_required" |
           "denied" | "cancelled" | "unknown";
   durationMs: number;
-  sideEffectStatus: "none" | "not_started" | "applied" | "unknown";
+  sideEffectStatus: "none" | "not_started" | "applied" | "unknown" | "compensated";
+  outputValidation: "valid" | "invalid" | "not_available";
   output: O | null;
   artifact: ArtifactReference | null;
   error: StructuredError | null;
@@ -108,12 +163,16 @@ interface ToolResultEnvelope<O = unknown> {
 - `RUNTIME-FR-008`：取消发生在执行前返回 not_started；执行中写工具的取消可能返回 unknown。
 - `RUNTIME-FR-009`：observer、ArtifactStore 或事件写入失败不得让已经发生的副作用被描述为未发生。
 - `RUNTIME-FR-010`：Runtime 不把环境变量全集传给子进程；按工具 allowlist 构造环境。
+- `RUNTIME-FR-011`：requested/effective 参数分别计算 hash，所有默认值和规范化进入 transformation ledger；权限、预算、执行和批准只使用 effective 参数。
+- `RUNTIME-FR-012`：`accepted`、`started/executed`、`output verified` 是不同事实；只有 output schema 通过且 finish 事件已持久化才返回 `completed`。
+- `RUNTIME-FR-013`：取消请求先持久化为 `CANCEL_REQUESTED`；只有执行明确未开始或已终止且副作用可判定时才记录 `CANCELLED`，否则进入 `UNKNOWN`。
+- `RUNTIME-FR-014`：journal/ArtifactStore 在副作用后失败时不得返回 completed；Runtime 返回 unknown 或 evidence-pending 结构化错误，并保留当前进程可用的 operation/provider identity 供恢复对账。
 
 ## 6. 错误与恢复矩阵
 
 | side effect | 执行前失败 | 执行中失败/断连 | 重试 |
 | --- | --- | --- | --- |
-| none | failed/not_started | failed/none | policy=safe 时有界重试 |
+| none | failed/none | failed/none | policy=safe 时有界重试 |
 | workspace_write | failed/not_started | unknown 或 applied | 先检查 codeVersion/diff |
 | external_write | failed/not_started | unknown | Provider 对账后决定 |
 
@@ -140,6 +199,9 @@ interface ToolResultEnvelope<O = unknown> {
 - `RUNTIME-AC-005`：外部写在响应丢失 fixture 中返回 unknown/retryable=false。
 - `RUNTIME-AC-006`：取消、timeout、observer 失败和 ArtifactStore 失败的副作用状态准确。
 - `RUNTIME-AC-007`：18 个工具契约测试都只能通过 Runtime 执行。
+- `RUNTIME-AC-008`：未收到 durable begin acknowledgement 时每类工具的 execute 次数均为零。
+- `RUNTIME-AC-009`：requested 参数经默认值/路径规范化后，批准 hash 只绑定 effective 参数且 transformation ledger 可重放。
+- `RUNTIME-AC-010`：取消请求、晚到成功结果和 finish 落库失败的组合不会把已应用副作用标为 cancelled/not_started。
 
 ## 10. 实现任务建议
 

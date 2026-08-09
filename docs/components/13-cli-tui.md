@@ -38,7 +38,21 @@
 | `config` | check/set/show | 脱敏配置 | C12 |
 | `eval` | suite/filter/baseline | run/report | C15 |
 
-脚本友好模式使用 `--json`/NDJSON，不输出 ANSI；交互模式使用 Ink。
+脚本友好模式使用 `--json`/NDJSON，不输出 ANSI；交互模式使用 Ink。NDJSON 的 stdout 只允许出现下述版本化记录，诊断日志写 stderr：
+
+```ts
+interface CliRecord {
+  schemaVersion: 1;
+  kind: "session" | "event" | "prompt" | "approval" | "result" | "error";
+  emittedAt: UtcTimestamp;
+  sessionId: StableId | null;
+  sequence: number | null;
+  requestId: StableId | null;
+  data: JsonValue;
+}
+```
+
+消费者必须忽略同主版本新增的未知可选字段，并拒绝未知主版本。`event` 记录中的 sequence 可作为恢复游标；普通日志、spinner、进度字符和 ANSI 永不混入 stdout。
 
 ## 4. 实时视图
 
@@ -66,6 +80,9 @@
 - `CLI-FR-008`：Trace 视图能跳到首次错误、首次偏离和相关 parent span。
 - `CLI-FR-009`：所有命令提供 `--help`，无效参数不创建 Session。
 - `CLI-FR-010`：UI 使用计划、动作和决策摘要解释行为，不展示 reasoning item 原文。
+- `CLI-FR-011`：ask/approval 输出稳定 request ID；答复必须显式引用该 ID，已解决、过期或绑定已变化的请求返回稳定错误，不能作用于“当前看起来最像”的请求。
+- `CLI-FR-012`：`config set` 只接受非秘密字段；credential 只能通过环境变量或系统凭证引用配置，CLI 不把秘密写入配置文件、shell history 建议或导出。
+- `CLI-FR-013`：非 TTY 默认在需要输入/批准时输出一条 prompt/approval 记录并以 code 3 退出；显式 policy 只能自动拒绝或读取绑定 request ID 的预先决策，禁止 blanket auto-approve。
 
 ## 6. HITL 状态
 
@@ -78,7 +95,7 @@ RUNNING
 
 三者交互必须不同：普通回答不能充当批准；批准界面不能用于外部状态对账。
 
-## 7. 退出码建议
+## 7. 稳定退出码
 
 | code | 含义 |
 | --- | --- |
@@ -88,6 +105,13 @@ RUNNING
 | 3 | 需要用户输入且当前模式不可交互 |
 | 4 | 用户取消 |
 | 5 | 外部状态 unknown/需对账 |
+| 6 | 存储、Provider 或其他基础设施故障，任务结果未确定 |
+
+退出码属于脚本兼容契约，同一主版本不得改变含义。若命令成功生成 Session 但任务仍在等待，非交互模式按等待原因返回 3 或 5，而不是 0。
+
+## 7.1 Replay 与订阅交界
+
+CLI 只调用 C12 `SessionHandle.streamEvents({afterSequence})` 或 C14 等价查询，不自行实现“先 list、后 subscribe”。Application/EventStore 必须提供单一逻辑游标保证交界无遗漏；CLI 对重复 event ID/sequence 做幂等呈现，并在断连时从最后已渲染 sequence 继续。
 
 ## 8. 安全与隐私
 
@@ -105,6 +129,9 @@ RUNNING
 - `CLI-AC-005`：取消达到 2 秒停止新调用、5 秒终止可控进程。
 - `CLI-AC-006`：JSON 模式可由脚本解析且不混入日志/ANSI。
 - `CLI-AC-007`：UX 评估“理解当前状态”和“定位失败”至少比 OpenCode 高 1 分。
+- `CLI-AC-008`：NDJSON golden tests 固定 schema、stdout/stderr 分离、控制字符转义和全部退出码。
+- `CLI-AC-009`：历史重放与实时事件在每个 sequence 交界注入并发事件时均无遗漏；重复投递不会重复显示副作用。
+- `CLI-AC-010`：非 TTY、过期 request ID 和预先拒绝 policy 的测试证明不存在默认批准路径。
 
 ## 10. 实现任务建议
 
