@@ -30,11 +30,19 @@
 | 依赖 | 需要稳定的能力 | 未满足时禁止 |
 | --- | --- | --- |
 | C00 | usage、结构化错误、取消和序列化类型 | 定义公共 Adapter 返回值 |
-| C01 | model started/delta/completed/failed 事件所需字段 | 接入 AgentEventLoop |
+| C01 | model started/completed、span 和结构化失败 context 所需字段 | 接入 AgentEventLoop |
 
 C05 的 tool call 契约必须在 C11 开发真实循环前冻结；C06 依赖其输入 item 与工具 schema 格式。
 
 ## 4. 公共接口
+
+### 4.1 当前可编译基线
+
+当前接口只有 `generate({ input: string, signal, deadlineAt })`，返回一次性 `outputText`、response ID 和 usage；没有 tools、stream、continuation、capabilities 或结构化错误流。
+
+### 4.2 目标接口（规划中）
+
+下列流式接口须在 C05 契约测试完成后才能供 C06/C11 接线：
 
 ```ts
 interface ModelRequest {
@@ -62,6 +70,8 @@ interface ModelAdapter {
   stream(request: ModelRequest): AsyncIterable<ModelStreamEvent>;
 }
 ```
+
+`ModelStreamEvent` 是 Adapter 与 Loop 之间的归一化运行时流，不与 `AgentEvent` 类型一一对应；C11 应聚合 delta，并按 C01 目录写入 `model.started`/`model.completed`，失败或取消由 completed 事实的 operation/error context 表达。
 
 核心层只看归一化 item；DeepSeek/OpenAI SDK 原始对象只能在 Provider 内部出现。
 

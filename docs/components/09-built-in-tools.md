@@ -27,6 +27,8 @@ Provider 管理 OS/SDK/CLI 细节；ToolDefinition 管理模型可见 schema；T
 
 ## 3. 总清单与依赖顺序
 
+除 `finish_task` 工厂外，本节及后续各工具 schema 均为目标目录（规划中），当前 Registry 未注册这些工具，Provider 也尚不存在。
+
 | 顺序 | 工具 | 风险 | 副作用 | 重试 | 阶段 |
 | --- | --- | --- | --- | --- | --- |
 | 1 | `list_files` | automatic | none | safe | D3 |

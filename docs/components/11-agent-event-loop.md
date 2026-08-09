@@ -38,6 +38,8 @@
 
 ## 4. 循环伪代码
 
+当前 `AgentEventLoop` 只实现 `createSession` 并追加 `session.created`；下列循环是 C11 目标调度语义（规划中），不是当前可调用实现。
+
 ```ts
 while (!terminal) {
   assertNotCancelled();
@@ -120,7 +122,7 @@ idle
 
 ## 9. 事件与可观测性
 
-每步至少产生：step/plan、model started/completed/failed、tool started/completed/failed、approval/user wait、verification、completion、budget 和取消事件。UI 当前状态必须能从事件投影，不依赖 Loop 私有变量。
+每步至少产生：plan/budget、`model.started`/`model.completed`、tool started/completed/failed、approval/user wait、verification、completion 和取消事件。模型失败/取消写入 `model.completed` 的结构化 operation/error context；不得发明 C01 目录之外的 `model.failed` 或 `step` 事件。UI 当前状态必须能从事件投影，不依赖 Loop 私有变量。
 
 ## 10. 安全要求
 

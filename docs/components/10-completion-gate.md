@@ -1,6 +1,6 @@
 # C10 CompletionGate 与完成声明
 
-- 状态：基础校验和 `finish_task` 工厂已实现，真实证据 Provider 未接
+- 状态：基础校验、可审计 SafetyVeto 和 `finish_task` 工厂已实现；claim 版本、完整 evidence、稳定 reason code 和真实证据 Provider 未接
 - 目标阶段：D4
 - 代码位置：`src/completion/completion-gate.ts`、`src/tools/builtin/finish-task.ts`
 - 硬依赖：[C00](00-shared-contracts.md)、[C01](01-event-state.md)、[C02](02-storage-artifacts.md)、[C09](09-built-in-tools.md)
@@ -48,9 +48,16 @@ interface VerificationEvidence {
   artifact: ArtifactReference | null;
   codeVersion: string;
 }
+
+interface SafetyVeto {
+  code: string;
+  description: string;
+  eventId: StableId | null;
+  artifact: ArtifactReference | null;
+}
 ```
 
-当前实现需扩展 claimVersion、稳定 reason code、summary 和 evidence 的版本绑定。
+当前实现的 `SafetyVeto` 已强制至少引用一个 event 或 Artifact；verification 仍使用简化的字符串 evidence。还需扩展 claimVersion、稳定 reason code、summary、完整 `VerificationEvidence` 和 evidence 的版本绑定。以上完整 `CompletionClaim` 是目标接口（规划中），不能当作当前全部字段已经存在。
 
 ## 4. 判定顺序
 
@@ -96,7 +103,7 @@ interface VerificationEvidence {
 
 至少包括：越界修改、覆盖无关用户改动、泄密、未授权高风险操作、破坏性 Git、伪造验证、关键 trace 缺失、取消后继续产生副作用。
 
-否决来源必须引用事件或 Artifact，不能只保存自然语言标签。
+否决来源必须引用事件或 Artifact，不能只保存自然语言标签；当前 `safetyVetoSchema` 已执行这一最小门禁。
 
 ## 8. 错误与恢复
 

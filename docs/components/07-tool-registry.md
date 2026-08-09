@@ -25,6 +25,8 @@
 
 ## 3. ToolDefinition
 
+### 3.1 目标接口（规划中）
+
 ```ts
 interface ToolDefinition<I, O> {
   name: string;
@@ -40,7 +42,9 @@ interface ToolDefinition<I, O> {
 }
 ```
 
-当前代码缺 `version`、`outputSchema` 和 availability，实施 C07 时必须补齐。
+### 3.2 当前可编译基线
+
+当前代码只有 name、description、risk、sideEffect、retryPolicy、inputSchema 和 execute；缺 `version`、`outputSchema`、availability、策略组合校验、模型投影和目录 hash，实施 C07 时必须补齐。
 
 ## 4. 功能需求
 

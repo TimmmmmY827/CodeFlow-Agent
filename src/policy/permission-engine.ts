@@ -35,6 +35,8 @@ export class PermissionEngine {
           : { outcome: "confirm", reason: "Workspace write authorization is required." };
       case "single_confirmation":
         return this.#checkApproval(tool.name, context);
+      default:
+        return { outcome: "deny", reason: "The tool risk class is not registered." };
     }
   }
 

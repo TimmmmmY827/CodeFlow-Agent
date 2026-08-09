@@ -1,6 +1,6 @@
 # C02 存储、EventStore 与 ArtifactStore
 
-- 状态：SQLite schema 和接口存在，持久化实现缺失
+- 状态：SQLite schema、C01 内存 EventStore 和最小 storage 接口存在；SQLite/File 持久化、Session 元数据与恢复缺失
 - 目标阶段：D7；接口应在 D3 前冻结
 - 代码位置：`src/storage/`、`src/events/event-store.ts`
 - 硬依赖：[C00](00-shared-contracts.md)、[C01](01-event-state.md)
@@ -50,27 +50,49 @@ C08 可先依赖 `ArtifactStore` 接口开发；C14 的恢复、删除和保留�
 
 ## 5. 公开接口
 
+### 5.1 当前可编译基线
+
+`EventStore` 已由 C01 提供内存实现；`src/storage/storage.ts` 目前只有供 C08 使用的最小接口，没有 Session 元数据、读取/校验 Artifact、pin、retention 或删除收据：
+
+```ts
+interface SessionRepository {
+  appendEvent(event: AgentEvent): Promise<void>;
+  listEvents(sessionId: StableId): Promise<readonly AgentEvent[]>;
+  deleteSession(sessionId: StableId): Promise<void>;
+}
+
+interface ArtifactStore {
+  write(sessionId: StableId, mediaType: string, content: Uint8Array,
+        sensitivity: "normal" | "sensitive"): Promise<ArtifactReference>;
+  deleteSessionArtifacts(sessionId: StableId): Promise<void>;
+}
+```
+
+### 5.2 目标接口（规划中）
+
+以下接口是 C02 的完成目标，尚不能被下游当作已存在的代码导入：
+
 ```ts
 interface EventStore {
   append(event: AgentEvent): Promise<"inserted" | "duplicate">;
-  list(sessionId: string, afterSequence?: number): Promise<AgentEvent[]>;
-  latestSequence(sessionId: string): Promise<number | null>;
+  list(sessionId: StableId, afterSequence?: number): Promise<readonly AgentEvent[]>;
+  latestSequence(sessionId: StableId): Promise<number | null>;
 }
 
 interface SessionRepository {
   create(input: CreateSessionRecord): Promise<void>;
-  get(sessionId: string): Promise<SessionRecord | null>;
+  get(sessionId: StableId): Promise<SessionRecord | null>;
   list(filter: SessionFilter): Promise<SessionSummary[]>;
-  setPinned(sessionId: string, pinned: boolean): Promise<void>;
-  delete(sessionId: string): Promise<DeleteReceipt>;
+  setPinned(sessionId: StableId, pinned: boolean): Promise<void>;
+  delete(sessionId: StableId): Promise<DeleteReceipt>;
 }
 
 interface ArtifactStore {
-  write(sessionId: string, mediaType: string, content: Uint8Array,
+  write(sessionId: StableId, mediaType: string, content: Uint8Array,
         sensitivity: "normal" | "sensitive"): Promise<ArtifactReference>;
   read(ref: ArtifactReference): Promise<Uint8Array>;
   verify(ref: ArtifactReference): Promise<boolean>;
-  deleteSessionArtifacts(sessionId: string): Promise<DeleteReceipt>;
+  deleteSessionArtifacts(sessionId: StableId): Promise<DeleteReceipt>;
 }
 ```
 

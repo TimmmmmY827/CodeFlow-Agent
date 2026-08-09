@@ -40,6 +40,8 @@
 
 ## 4. 输出契约
 
+当前 `ContextAssembler.assemble(sections)` 只按固定优先级排序并输出带来源标签的字符串。下列 `AssembledContext`、manifest、token 估算、source refs、omitted 项和 checkpoint 都是目标契约（规划中）：
+
 ```ts
 interface AssembledContext {
   input: ModelInputItem[];

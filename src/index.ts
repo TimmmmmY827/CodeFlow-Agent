@@ -1,6 +1,16 @@
 export { AgentEventLoop } from "./agent/agent-event-loop.js";
 export { createApplication } from "./app/application.js";
-export { CompletionGate } from "./completion/completion-gate.js";
+export {
+  CompletionGate,
+  completionClaimSchema,
+  safetyVetoSchema,
+} from "./completion/completion-gate.js";
+export type {
+  CompletionClaim,
+  CompletionDecision,
+  CompletionSnapshot,
+  SafetyVeto,
+} from "./completion/completion-gate.js";
 export { ContextAssembler } from "./context/context-assembler.js";
 export {
   AGENT_EVENT_SCHEMA_VERSION,

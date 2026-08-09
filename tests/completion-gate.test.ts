@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 
 import { CompletionGate, type CompletionClaim } from "../src/completion/completion-gate.js";
@@ -18,7 +20,14 @@ describe("CompletionGate", () => {
     const claim: CompletionClaim = {
       ...validClaim(),
       traceComplete: false,
-      safetyVetoes: ["unapproved external write"],
+      safetyVetoes: [
+        {
+          code: "unapproved_external_write",
+          description: "unapproved external write",
+          eventId: randomUUID(),
+          artifact: null,
+        },
+      ],
       unverifiedItems: [{ description: "hidden tests", blocking: true }],
     };
     const result = new CompletionGate().evaluate(claim, {
@@ -31,10 +40,34 @@ describe("CompletionGate", () => {
       expect.arrayContaining([
         "code version changed after the claim",
         "critical trace is incomplete",
-        "safety veto: unapproved external write",
+        "safety veto [unapproved_external_write]: unapproved external write",
         "blocking item is unverified: hidden tests",
       ]),
     );
+  });
+
+  it("rejects a safety veto that has no auditable fact reference", () => {
+    const claim = {
+      ...validClaim(),
+      safetyVetoes: [
+        {
+          code: "unapproved_external_write",
+          description: "unapproved external write",
+          eventId: null,
+          artifact: null,
+        },
+      ],
+    };
+
+    const result = new CompletionGate().evaluate(claim, {
+      codeVersion: claim.codeVersion,
+      diffHash: claim.diffHash,
+    });
+
+    expect(result).toMatchObject({
+      outcome: "rejected",
+      reasons: [expect.stringContaining("must reference an event or Artifact")],
+    });
   });
 
   it("exposes the gate through the finish_task tool contract", async () => {

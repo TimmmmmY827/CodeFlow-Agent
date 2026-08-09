@@ -60,6 +60,24 @@ describe("PermissionEngine", () => {
 
     expect(decision.outcome).toBe("deny");
   });
+
+  it("denies an unregistered risk class at the runtime boundary", () => {
+    const untrustedTool = {
+      name: "repository_supplied_tool",
+      risk: "repository_defined",
+    } as unknown as Parameters<PermissionEngine["decide"]>[0];
+
+    const decision = new PermissionEngine().decide(untrustedTool, {
+      taskWriteAuthorized: true,
+      operationHash: null,
+      approvalToken: null,
+    });
+
+    expect(decision).toEqual({
+      outcome: "deny",
+      reason: "The tool risk class is not registered.",
+    });
+  });
 });
 
 function tool(name: string, risk: ToolRisk): ToolDefinition<Record<string, never>, void> {

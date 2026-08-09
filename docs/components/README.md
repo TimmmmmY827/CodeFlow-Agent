@@ -16,21 +16,28 @@
 
 禁止只根据目录名或当前占位接口猜测需求。若实现需要改变上游契约，必须先修改上游文档和测试，再修改下游。
 
+### 接口与状态标注规则
+
+- 标记为“已实现”的组件，其公开接口必须与当前可编译代码一致。
+- 尚未完成的组件同时保留“当前基线接口”和“目标接口（规划中）”；后者是验收目标，不表示代码已经存在。
+- 需求条目和验收标准默认描述目标形态；只有列出测试证据并通过统一完成门，才能把状态改为“已实现”。
+- 后续 Agent 不得引用目标接口直接接线，必须先完成目标组件的依赖门并把对应契约落到代码和测试。
+
 ## 组件目录
 
 | ID | 组件文档 | 目标阶段 | 当前基线 | 硬依赖 | 主要下游 |
 | --- | --- | --- | --- | --- | --- |
-| C00 | [共享契约](00-shared-contracts.md) | D1–D2 | 部分存在 | 无 | 全部组件 |
+| C00 | [共享契约](00-shared-contracts.md) | D1–D2 | 已实现 | 无 | 全部组件 |
 | C01 | [事件事实层与 StateReducer](01-event-state.md) | D1–D3 | 已实现 | C00 | Storage、Loop、CLI、Trace、Eval |
-| C02 | [存储与 ArtifactStore](02-storage-artifacts.md) | D7 | 仅 schema/interface | C00、C01 | Runtime、Session、Loop、Trace |
+| C02 | [存储与 ArtifactStore](02-storage-artifacts.md) | D7 | 内存接口；SQLite/File 实现缺失 | C00、C01 | Runtime、Session、Loop、Trace |
 | C03 | [PermissionEngine](03-permission-engine.md) | D1–D6 | 基础实现 | C00 | Runtime、Loop、CLI、发布工具 |
 | C04 | [BudgetController](04-budget-controller.md) | D3–D5 | 基础实现 | C00 | Loop、CLI、Eval |
 | C05 | [ModelAdapter](05-model-adapter.md) | D2 | 最小非流式实现 | C00、C01 | Context、Loop、成本账本 |
 | C06 | [ContextAssembler](06-context-assembler.md) | D3 | 排序骨架 | C00、C01、C05、C07 | Model、Loop |
 | C07 | [ToolDefinition 与 ToolRegistry](07-tool-registry.md) | D1–D3 | 基础实现 | C00 | Runtime、Context、Loop |
-| C08 | [ToolRuntime](08-tool-runtime.md) | D3–D4 | 最小实现 | C00、C02、C03、C07 | 内置工具、Loop、Trace |
+| C08 | [ToolRuntime](08-tool-runtime.md) | D3–D4 | 基础流水线；版本/输出 schema 等缺失 | C00、C02、C03、C07 | 内置工具、Loop、Trace |
 | C09 | [18 个内置工具与外部 Provider](09-built-in-tools.md) | D3–D6 | 仅 `finish_task` 工厂 | C00、C02、C03、C07、C08 | Loop、Completion、CLI |
-| C10 | [CompletionGate](10-completion-gate.md) | D4 | 基础实现 | C00、C01、C02、C09 | Loop、CLI、Eval |
+| C10 | [CompletionGate](10-completion-gate.md) | D4 | 基础 Gate；完整 evidence/reason 契约缺失 | C00、C01、C02、C09 | Loop、CLI、Eval |
 | C11 | [AgentEventLoop](11-agent-event-loop.md) | D3–D4 | 仅创建 Session | C01–C10 | Application、CLI、Eval |
 | C12 | [Application Service](12-application-service.md) | D3–D7 | 基础依赖组装 | C02–C11 | CLI、Session 命令、Eval |
 | C13 | [CLI/TUI 与 HITL](13-cli-tui.md) | D5 | 命令骨架 | C01、C03、C04、C11、C12、C14 | 用户、Eval |

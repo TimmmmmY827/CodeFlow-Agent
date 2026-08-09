@@ -1,6 +1,6 @@
 # C08 ToolRuntime
 
-- 状态：输入校验、权限、hash、执行、结果信封和 Artifact 外置基础已实现
+- 状态：输入校验、权限、hash、执行、JSON 边界和 Artifact 外置基础已实现；toolVersion、outputSchema、timeout、预算/事件持久化和故障恢复缺失
 - 目标阶段：D3–D4
 - 代码位置：`src/tools/tool-runtime.ts`
 - 硬依赖：[C00](00-shared-contracts.md)、[C02](02-storage-artifacts.md)、[C03](03-permission-engine.md)、[C07](07-tool-registry.md)
@@ -27,6 +27,19 @@
 
 ## 3. 执行流水线
 
+### 3.1 当前可编译流水线
+
+```text
+lookup -> validate input -> canonical operation hash -> cancellation check
+ -> permission decision -> check/consume in-memory approval -> emit started
+ -> execute -> JSON serialization boundary -> inline or ArtifactStore
+ -> emit finished -> return envelope
+```
+
+当前没有 budget reservation、per-tool timeout、outputSchema 或持久化 event/approval；observer/ArtifactStore 失败后的证据恢复也未完成。
+
+### 3.2 目标流水线（规划中）
+
 ```text
 lookup
  -> validate input
@@ -44,9 +57,29 @@ lookup
  -> return envelope
 ```
 
-顺序是安全契约。尤其批准必须绑定解析后的最终输入，并在副作用开始前消费。
+目标顺序是安全契约。尤其批准必须绑定解析后的最终输入，并在副作用开始前完成事务性消费。
 
 ## 4. 结果信封
+
+### 4.1 当前可编译基线
+
+当前 `ToolResultEnvelope` 没有 `toolVersion`；Runtime 只验证输出可 JSON 序列化，没有 `outputSchema`。默认 inline 上限和 Artifact 外置已实现，但 per-tool timeout、环境 allowlist、预算 reservation、持久化批准消费与事件 writer 尚未接入。
+
+```ts
+interface ToolResultEnvelope {
+  toolName: string;
+  operationHash: string;
+  status: "completed" | "failed" | "approval_required" |
+          "denied" | "cancelled" | "unknown";
+  durationMs: number;
+  sideEffectStatus: SideEffectStatus;
+  output: JsonValue | null;
+  artifact: ArtifactReference | null;
+  error: StructuredError | null;
+}
+```
+
+### 4.2 目标接口（规划中）
 
 ```ts
 interface ToolResultEnvelope<O = unknown> {

@@ -1,6 +1,6 @@
 # C03 PermissionEngine 与批准契约
 
-- 状态：风险判断、operation hash 和进程内一次性消费已实现
+- 状态：风险判断、operation hash 和未知风险默认拒绝已实现；一次性消费仍由 C08 进程内完成，持久化批准缺失
 - 目标阶段：D1–D6
 - 代码位置：`src/policy/permission-engine.ts`、`operation-hash.ts`
 - 硬依赖：[C00 共享契约](00-shared-contracts.md)
@@ -40,14 +40,16 @@
 
 ```ts
 interface ApprovalToken {
-  approvalId: string;
+  approvalId: StableId;
   toolName: string;
   operationHash: string;
-  expiresAt: string;
+  expiresAt: UtcTimestamp;
 }
 
-operationHash = sha256(canonicalJson({ toolName, parsedInput, codeVersion }))
+operationHash = sha256(canonicalJson({ toolName, input, codeVersion }))
 ```
+
+这里的 `input` 是 `inputSchema` 解析后的最终值，不是模型发送的原始 JSON。当前 `ApprovalToken` 和 `PermissionContext` 已可编译；任务授权的 Session/Task/workspace/version 绑定、批准摘要和持久化消费仍是目标契约。
 
 Runtime 在工具开始执行前消费 token。消费后即使工具失败也不得自动复用；外部写失败进入 `UNKNOWN` 并先对账。
 

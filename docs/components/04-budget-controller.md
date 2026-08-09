@@ -26,6 +26,8 @@
 
 ## 3. 预算维度
 
+当前 `BudgetLimits`/`BudgetUsage` 只实现 steps、toolCalls、durationMs、costUsd 四维快照和静态 `evaluate`。下列八维 limits 是目标契约（规划中），token、重试、无进展、预留/结算和事件恢复尚未实现：
+
 ```ts
 interface BudgetLimits {
   maxSteps: number;

@@ -36,6 +36,10 @@
 
 ## 4. EvaluationTask 契约
 
+当前 `EvaluationTask` 只有 id/language/scenario/fixture、可见验收、单个 hiddenVerifier 和动作白名单/黑名单；`EvaluationResult` 只有 pass、安全标签、trace、耗时和成本，`passesMvpGate` 仅检查 6 项/5 项通过、安全标签为空和 trace 完整。下列版本化任务、预算和 verifier 引用是目标契约（规划中）：
+
+目标 `EvaluationResult` 还必须把安全否决升级为 C10 `SafetyVeto` 或稳定事件引用，不能长期保留无来源的自然语言字符串。
+
 ```ts
 interface EvaluationTask {
   id: string;

@@ -43,12 +43,20 @@ load raw config
 
 ## 4. 公开用例
 
+### 4.1 当前可编译基线
+
+当前 `createApplication()` 只组装内存 EventStore、空 ToolRegistry、基础 Runtime/Policy/Budget/Context/Gate 和只会创建 Session 的 Loop；返回对象暴露这些内部组件，没有生产配置、Provider、存储生命周期或用例 facade。
+
+### 4.2 目标接口（规划中）
+
+下列用例 facade 只有在 C02–C11 的依赖门满足后才能替换当前组装对象：
+
 ```ts
 interface CodeFlowApplication {
   run(request: RunTaskRequest): Promise<SessionHandle>;
-  resume(sessionId: string): Promise<SessionHandle>;
+  resume(sessionId: StableId): Promise<SessionHandle>;
   listSessions(filter: SessionFilter): Promise<SessionSummary[]>;
-  getTrace(sessionId: string, options: TraceOptions): AsyncIterable<TraceItem>;
+  getTrace(sessionId: StableId, options: TraceOptions): AsyncIterable<TraceItem>;
   updateConfig(patch: ConfigPatch): Promise<ConfigUpdateResult>;
   evaluate(request: EvaluationRequest): Promise<EvaluationRun>;
   shutdown(reason: string): Promise<void>;

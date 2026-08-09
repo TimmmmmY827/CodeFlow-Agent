@@ -27,6 +27,8 @@
 
 ## 3. 命令契约
 
+当前 Commander 已注册这些命令名称，但除 `run --prompt` 创建内存 Session 和 `config` 显示基础配置外，其余命令只输出骨架提示；下表描述目标行为（规划中）。
+
 | 命令 | 输入 | 成功输出 | 主要依赖 |
 | --- | --- | --- | --- |
 | `codeflow run [workspace]` | goal、验收、预算、授权 | Session UI/ID | C12/C11 |

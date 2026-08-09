@@ -1,6 +1,6 @@
 # C14 Session、Trace 与生命周期治理
 
-- 状态：内存 Session、存储接口和基础 JSON 脱敏存在
+- 状态：内存事件、最小存储接口和基础 JSON 脱敏存在；Session repository、恢复、retention 和删除传播缺失
 - 目标阶段：D7
 - 代码位置：`src/storage/`、`src/trace/`、Application Session use cases
 - 硬依赖：[C01](01-event-state.md)、[C02](02-storage-artifacts.md)、[C03](03-permission-engine.md)、[C12](12-application-service.md)
@@ -26,15 +26,17 @@
 
 ## 3. Session 契约
 
+当前没有 `SessionRecord` repository 或恢复用例；仅有最小 `SessionRepository` 接口、内存事件和基础 JSON 脱敏导出。下列 `SessionRecord` 是 C14/C02 完成后的目标契约（规划中）：
+
 ```ts
 interface SessionRecord {
-  sessionId: string;
-  workspaceId: string;
+  sessionId: StableId;
+  workspaceId: StableId;
   goal: string;
   lifecycle: SessionLifecycle;
-  createdAt: string;
-  updatedAt: string;
-  expiresAt: string | null;
+  createdAt: UtcTimestamp;
+  updatedAt: UtcTimestamp;
+  expiresAt: UtcTimestamp | null;
   pinned: boolean;
   configVersion: string;
   toolCatalogHash: string;
