@@ -1,7 +1,6 @@
-import { randomUUID } from "node:crypto";
-
 import { createAgentEvent, createEventContext } from "../events/agent-event.js";
 import type { EventStore } from "../events/event-store.js";
+import { createStableId, type StableId } from "../shared/contracts.js";
 
 export interface CreateSessionRequest {
   readonly goal: string;
@@ -9,18 +8,18 @@ export interface CreateSessionRequest {
 }
 
 export interface CreatedSession {
-  readonly sessionId: string;
-  readonly taskId: string;
-  readonly traceId: string;
+  readonly sessionId: StableId;
+  readonly taskId: StableId;
+  readonly traceId: StableId;
 }
 
 export class AgentEventLoop {
   constructor(private readonly eventStore: EventStore) {}
 
   async createSession(request: CreateSessionRequest): Promise<CreatedSession> {
-    const sessionId = randomUUID();
-    const taskId = randomUUID();
-    const traceId = randomUUID();
+    const sessionId = createStableId();
+    const taskId = createStableId();
+    const traceId = createStableId();
     await this.eventStore.append(
       createAgentEvent({
         sessionId,

@@ -35,6 +35,29 @@ describe("ToolRuntime", () => {
     });
   });
 
+  it("rejects parsed tool values that cannot cross the JSON boundary", async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "invalid_contract_tool",
+      description: "Expose a non-JSON tool contract",
+      risk: "automatic",
+      sideEffect: "none",
+      retryPolicy: "safe",
+      inputSchema: z.object({ requestedAt: z.date() }),
+      execute: async () => ({ ok: true }),
+    });
+    const runtime = new ToolRuntime(registry, new PermissionEngine());
+
+    const result = await runtime.execute(
+      request("invalid_contract_tool", { requestedAt: new Date("2026-08-09T00:00:00.000Z") }),
+    );
+
+    expect(result).toMatchObject({
+      status: "failed",
+      error: { category: "not_json_serializable", retryable: false },
+    });
+  });
+
   it("binds a confirmation to canonical input and code version", async () => {
     const registry = new ToolRegistry();
     registry.register({

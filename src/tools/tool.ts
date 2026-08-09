@@ -1,16 +1,22 @@
 import type { ZodType } from "zod";
 
-export type ToolRisk = "automatic" | "task_authorized" | "single_confirmation" | "control";
-export type ToolSideEffect = "none" | "workspace_write" | "external_write";
-export type ToolRetryPolicy = "safe" | "reconcile" | "never";
+import type {
+  CancellationContext,
+  StableId,
+  ToolRetryPolicy,
+  ToolRisk,
+  ToolSideEffect,
+} from "../shared/contracts.js";
 
-export interface ToolExecutionContext {
+export type { ToolRetryPolicy, ToolRisk, ToolSideEffect } from "../shared/contracts.js";
+
+export interface ToolExecutionContext extends CancellationContext {
   readonly workspace: string;
   readonly codeVersion: string | null;
+  readonly diffHash: string | null;
   readonly configVersion: string;
-  readonly signal: AbortSignal;
-  readonly sessionId: string;
-  readonly taskId: string;
+  readonly sessionId: StableId;
+  readonly taskId: StableId;
 }
 
 export interface ToolDefinition<TInput = unknown, TOutput = unknown> {

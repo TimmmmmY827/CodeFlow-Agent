@@ -1,5 +1,25 @@
-import { randomUUID } from "node:crypto";
 import { z } from "zod";
+
+import {
+  codeSnapshotSchema,
+  createCodeSnapshot,
+  createStableId,
+  createUtcTimestamp,
+  sideEffectStatusSchema,
+  stableIdSchema,
+  structuredErrorSchema,
+  toolRiskSchema,
+  usageRecordSchema,
+  utcTimestampSchema,
+  type StableId,
+  type StructuredError,
+  type UsageRecord,
+} from "../shared/contracts.js";
+import { isJsonValue, type JsonObject } from "../shared/json.js";
+import type { Result } from "../shared/result.js";
+import { parseVersionedSchema } from "../shared/versioned-schema.js";
+
+export const AGENT_EVENT_SCHEMA_VERSION = 1;
 
 export const agentEventTypeSchema = z.enum([
   "session.created",
@@ -20,6 +40,8 @@ export const agentEventTypeSchema = z.enum([
   "completion.verified",
   "completion.rejected",
   "operation.unknown",
+  "operation.reconciled",
+  "budget.updated",
   "session.cancelling",
   "session.cancelled",
   "session.failed",
@@ -27,118 +49,163 @@ export const agentEventTypeSchema = z.enum([
 
 export type AgentEventType = z.infer<typeof agentEventTypeSchema>;
 
-export const eventContextSchema = z.object({
-  workspacePath: z.string().min(1),
-  codeVersion: z.string().min(1).nullable(),
-  configVersion: z.string().min(1),
-  operation: z
-    .object({
-      kind: z.enum(["system", "model", "tool", "control"]),
-      name: z.string().min(1),
-      status: z.enum(["pending", "running", "completed", "failed", "cancelled", "unknown"]),
-      durationMs: z.number().nonnegative().nullable(),
-    })
-    .nullable(),
-  usage: z
-    .object({
-      inputTokens: z.number().int().nonnegative(),
-      outputTokens: z.number().int().nonnegative(),
-      cachedTokens: z.number().int().nonnegative(),
-      costUsd: z.number().nonnegative(),
-    })
-    .nullable(),
-  authorization: z
-    .object({
-      risk: z.enum(["automatic", "task_authorized", "single_confirmation", "control"]),
-      authorizationId: z.string().min(1).nullable(),
-      approvalId: z.string().min(1).nullable(),
-    })
-    .nullable(),
-  error: z
-    .object({
-      category: z.string().min(1),
-      message: z.string().min(1),
-      retryable: z.boolean(),
-      recovery: z.string().min(1).nullable(),
-    })
-    .nullable(),
-  sideEffectStatus: z.enum(["none", "not_started", "applied", "unknown", "compensated"]),
-});
+export const eventContextSchema = z
+  .object({
+    ...codeSnapshotSchema.shape,
+    operation: z
+      .object({
+        kind: z.enum(["system", "model", "tool", "control"]),
+        name: z.string().min(1),
+        status: z.enum(["pending", "running", "completed", "failed", "cancelled", "unknown"]),
+        durationMs: z.number().nonnegative().nullable(),
+        operationHash: z.string().min(1).nullable().optional(),
+      })
+      .nullable(),
+    usage: usageRecordSchema.nullable(),
+    authorization: z
+      .object({
+        risk: toolRiskSchema,
+        authorizationId: z.string().min(1).nullable(),
+        approvalId: z.string().min(1).nullable(),
+      })
+      .nullable(),
+    error: structuredErrorSchema.nullable(),
+    sideEffectStatus: sideEffectStatusSchema,
+    budget: z
+      .object({
+        usage: z
+          .object({
+            steps: z.number().int().nonnegative(),
+            toolCalls: z.number().int().nonnegative(),
+            durationMs: z.number().nonnegative(),
+            costUsd: z.number().nonnegative(),
+          }),
+        limits: z
+          .object({
+            maxSteps: z.number().int().positive(),
+            maxToolCalls: z.number().int().positive(),
+            maxDurationMs: z.number().positive(),
+            maxCostUsd: z.number().nonnegative(),
+          }),
+      })
+      .nullable()
+      .default(null),
+  })
+  .superRefine((context, refinement) => {
+    if (context.diffHash !== null && context.codeVersion === null) {
+      refinement.addIssue({
+        code: "custom",
+        message: "A diff hash requires a Git or controlled workspace code version.",
+        path: ["codeVersion"],
+      });
+    }
+    if (context.error && context.error.sideEffectStatus !== context.sideEffectStatus) {
+      refinement.addIssue({
+        code: "custom",
+        message: "Error and event side-effect status must match.",
+        path: ["error", "sideEffectStatus"],
+      });
+    }
+  });
 
 export type AgentEventContext = z.infer<typeof eventContextSchema>;
 
 export const agentEventSchema = z.object({
-  schemaVersion: z.literal(1),
-  eventId: z.string().uuid(),
-  sessionId: z.string().uuid(),
-  taskId: z.string().uuid(),
+  schemaVersion: z.literal(AGENT_EVENT_SCHEMA_VERSION),
+  eventId: stableIdSchema,
+  sessionId: stableIdSchema,
+  taskId: stableIdSchema,
   actorId: z.string().min(1),
-  parentTaskId: z.string().uuid().nullable(),
-  traceId: z.string().uuid(),
-  spanId: z.string().uuid(),
-  parentSpanId: z.string().uuid().nullable(),
+  parentTaskId: stableIdSchema.nullable(),
+  traceId: stableIdSchema,
+  spanId: stableIdSchema,
+  parentSpanId: stableIdSchema.nullable(),
   sequence: z.number().int().nonnegative(),
-  occurredAt: z.string().datetime(),
+  occurredAt: utcTimestampSchema,
   type: agentEventTypeSchema,
   context: eventContextSchema,
-  payload: z.record(z.string(), z.unknown()),
+  payload: z.custom<JsonObject>(
+    (value) => isJsonValue(value) && value !== null && !Array.isArray(value) && typeof value === "object",
+    "AgentEvent payload must be a JSON object.",
+  ),
 });
 
 export type AgentEvent = z.infer<typeof agentEventSchema>;
 
 export interface CreateAgentEventInput {
-  readonly sessionId: string;
-  readonly taskId: string;
+  readonly sessionId: StableId;
+  readonly taskId: StableId;
   readonly actorId?: string;
-  readonly parentTaskId?: string | null;
-  readonly traceId?: string;
-  readonly parentSpanId?: string | null;
+  readonly parentTaskId?: StableId | null;
+  readonly traceId?: StableId;
+  readonly spanId?: StableId;
+  readonly parentSpanId?: StableId | null;
   readonly sequence: number;
   readonly type: AgentEventType;
   readonly context: AgentEventContext;
-  readonly payload?: Readonly<Record<string, unknown>>;
+  readonly payload?: JsonObject;
   readonly occurredAt?: string;
 }
+
+type UsageRecordInput = Omit<UsageRecord, "durationMs" | "providerUsage"> &
+  Partial<Pick<UsageRecord, "durationMs" | "providerUsage">>;
 
 export interface CreateEventContextInput {
   readonly workspacePath: string;
   readonly codeVersion?: string | null;
+  readonly diffHash?: string | null;
   readonly configVersion?: string;
   readonly operation?: AgentEventContext["operation"];
-  readonly usage?: AgentEventContext["usage"];
+  readonly usage?: UsageRecordInput | null;
   readonly authorization?: AgentEventContext["authorization"];
-  readonly error?: AgentEventContext["error"];
+  readonly error?: StructuredError | null;
   readonly sideEffectStatus?: AgentEventContext["sideEffectStatus"];
+  readonly budget?: AgentEventContext["budget"];
 }
 
 export function createEventContext(input: CreateEventContextInput): AgentEventContext {
+  const snapshot = createCodeSnapshot(input);
   return eventContextSchema.parse({
-    workspacePath: input.workspacePath,
-    codeVersion: input.codeVersion ?? null,
-    configVersion: input.configVersion ?? "config:unversioned",
+    ...snapshot,
     operation: input.operation ?? null,
-    usage: input.usage ?? null,
+    usage: input.usage
+      ? {
+          ...input.usage,
+          durationMs: input.usage.durationMs ?? input.operation?.durationMs ?? 0,
+          providerUsage: input.usage.providerUsage ?? {},
+        }
+      : null,
     authorization: input.authorization ?? null,
     error: input.error ?? null,
     sideEffectStatus: input.sideEffectStatus ?? "none",
+    budget: input.budget ?? null,
   });
 }
 
 export function createAgentEvent(input: CreateAgentEventInput): AgentEvent {
   return agentEventSchema.parse({
-    schemaVersion: 1,
-    eventId: randomUUID(),
+    schemaVersion: AGENT_EVENT_SCHEMA_VERSION,
+    eventId: createStableId(),
     sessionId: input.sessionId,
     taskId: input.taskId,
     actorId: input.actorId ?? "agent:primary",
     parentTaskId: input.parentTaskId ?? null,
-    traceId: input.traceId ?? randomUUID(),
-    spanId: randomUUID(),
+    traceId: input.traceId ?? createStableId(),
+    spanId: input.spanId ?? createStableId(),
     parentSpanId: input.parentSpanId ?? null,
     sequence: input.sequence,
-    occurredAt: input.occurredAt ?? new Date().toISOString(),
+    occurredAt: input.occurredAt ?? createUtcTimestamp(),
     type: input.type,
     context: input.context,
     payload: input.payload ?? {},
   });
+}
+
+export function parseAgentEvent(input: unknown): Result<AgentEvent, StructuredError> {
+  return parseVersionedSchema(
+    "AgentEvent",
+    AGENT_EVENT_SCHEMA_VERSION,
+    agentEventSchema,
+    input,
+  );
 }

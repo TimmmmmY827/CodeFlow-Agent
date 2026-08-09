@@ -1,4 +1,4 @@
-import type { ToolRisk } from "../tools/tool.js";
+import type { StableId, ToolRisk, UtcTimestamp } from "../shared/contracts.js";
 
 export interface PermissionSubject {
   readonly name: string;
@@ -6,10 +6,10 @@ export interface PermissionSubject {
 }
 
 export interface ApprovalToken {
-  readonly approvalId: string;
+  readonly approvalId: StableId;
   readonly toolName: string;
   readonly operationHash: string;
-  readonly expiresAt: string;
+  readonly expiresAt: UtcTimestamp;
 }
 
 export interface PermissionContext {

@@ -1,49 +1,63 @@
 # C01 事件事实层与 StateReducer
 
-- 状态：结构化 schema 与基础 reducer 已实现，事件目录和恢复语义待补
-- 目标阶段：D1–D3
-- 代码位置：`src/events/agent-event.ts`、`event-store.ts`、`state-reducer.ts`
+- 状态：已实现，D1–D3 事件事实、增量归约、批量重放和 trace 完整性门禁已交付
+- 代码位置：`src/events/agent-event.ts`、`src/events/event-store.ts`、`src/events/state-reducer.ts`
+- 测试位置：`tests/agent-event.test.ts`、`tests/event-store.test.ts`、`tests/state-reducer.test.ts`、`tests/state-reducer-contract.test.ts`
 - 硬依赖：[C00 共享契约](00-shared-contracts.md)
+- 参考 ADR：[ADR-0001](../decisions/0001-modular-monolith.md)、[ADR-0002](../decisions/0002-coverage-review-corrections.md)
 - 下游消费者：C02、C10、C11、C13、C14、C15
 
-## 1. 目标
+## 1. 目标与边界
 
-用追加式事实事件记录 Agent 实际发生的模型、工具、审批、验证和生命周期变化，并通过纯函数 reducer 派生用户可见状态。事件是审计与恢复依据，UI 文本和摘要不能反向覆盖事实。
+C01 把 Agent 实际发生的模型、工具、审批、验证和生命周期变化记录为追加式 `AgentEvent` 事实，并通过无 I/O reducer 派生用户可见状态。事实不可被摘要或 UI 反向覆盖；原始 reasoning、凭证和超长结果不进入事件。
 
-## 2. 职责边界
+C01 不执行模型或工具、不决定权限/预算、不实现 SQLite 或 ArtifactStore。持久化由 C02 提供，实时 UI 由 C13 消费本组件的投影。
 
-### 必须负责
+## 2. 事件信封与目录
 
-- `AgentEvent` schema、事件类型目录和版本。
-- Session 内严格递增序号与幂等追加约束。
-- 生命周期、计划、活动操作、错误和验证状态的确定性投影。
-- 为恢复、Trace、CLI 和 Evaluation 提供相同事实源。
+每条事件包含：`schemaVersion`、event/session/task/actor/parent-task/trace/span 标识、UTC `occurredAt`、Session 单调 `sequence`、稳定 `type`、结构化 `context` 和 JSON `payload`。`context` 固定承载工作区/代码/配置版本、操作状态与 `operationHash`、用量、授权、错误、副作用状态和预算快照；长结果使用 `ArtifactReference`。
 
-### 明确不负责
+首版事件目录：
 
-- 执行模型或工具。
-- 决定权限、预算或任务是否真正完成。
-- 把原始 reasoning、凭证或无限长输出存进事件。
+- 会话：`session.created`、`session.started`、`session.cancelling`、`session.cancelled`、`session.failed`
+- 计划与交互：`plan.updated`、`user.input.requested`、`user.input.received`
+- 执行事实：`model.started`、`model.completed`、`tool.started`、`tool.completed`、`tool.failed`
+- 审批与验证：`approval.requested`、`approval.resolved`、`verification.started`、`verification.completed`
+- 完成门：`completion.claimed`、`completion.verified`、`completion.rejected`
+- 外部状态与预算：`operation.unknown`、`operation.reconciled`、`budget.updated`
 
-## 3. 前置依赖与解锁条件
+解析使用 `parseVersionedSchema`：未知主版本返回结构化 `unsupported_schema_version`；同一版本中的未知可选字段被忽略，保留已有事实语义。
 
-| 依赖 | 需要稳定的能力 | 未满足时禁止 |
-| --- | --- | --- |
-| C00 | StableId、CodeSnapshot、StructuredError、schema version | 新增持久化事件 |
+## 3. 公开契约
 
-事件 schema 首版稳定后才能实现 C02 SQLite EventStore；状态机稳定后才能实现 C13 实时 UI。
+```ts
+interface EventWriter {
+  append(event: AgentEvent): Promise<"inserted" | "duplicate">;
+}
 
-## 4. 事件信封
+interface EventReader {
+  list(sessionId: StableId, afterSequence?: number): Promise<readonly AgentEvent[]>;
+  latestSequence(sessionId: StableId): Promise<number | null>;
+}
 
-每条事件必须包含：
+interface EventSubscriber {
+  subscribe(sessionId: StableId, listener: (event: AgentEvent) => void | Promise<void>): () => void;
+}
 
-- 身份：event/session/task/actor/parent task/trace/span ID。
-- 顺序：schema 版本、UTC 时间、Session 单调序号。
-- 类型：稳定的 `eventType`。
-- context：工作区、代码/配置版本、操作状态、耗时、用量、授权、错误、副作用状态。
-- payload：只存事件特有且可序列化的内容；长结果改存 `ArtifactReference`。
+interface EventStore extends EventWriter, EventReader {}
 
-## 5. 生命周期状态机
+class StateReducer {
+  apply(event: AgentEvent): SessionView;
+  snapshot(): SessionView | null;
+}
+
+function reduceAgentEvents(events: readonly AgentEvent[]): SessionView | null;
+function checkTraceIntegrity(events: readonly unknown[]): TraceIntegrityReport;
+```
+
+`InMemoryEventStore` 是 C01 的可替换事实存储和流式订阅替身。它允许缺口被记录，以便完整性检查明确报出缺失事实；相同 event ID 且内容相同返回 `duplicate`，内容不同或序号不递增返回 `EventStoreError`，不会覆盖已有事实。读取和订阅返回副本，监听器失败不影响事实追加。
+
+## 4. 生命周期与投影
 
 ```mermaid
 stateDiagram-v2
@@ -55,6 +69,7 @@ stateDiagram-v2
     WAITING_APPROVAL --> RUNNING
     RUNNING --> VERIFYING
     VERIFYING --> RUNNING
+    VERIFYING --> FAILED
     RUNNING --> COMPLETION_CLAIMED
     COMPLETION_CLAIMED --> COMPLETION_VERIFIED
     COMPLETION_CLAIMED --> RUNNING
@@ -66,54 +81,22 @@ stateDiagram-v2
     UNKNOWN --> FAILED
 ```
 
-`verification.completed(passed)` 只表示一项验证产生证据，状态回到 `RUNNING`；只有 `completion.claimed` 经 C10 放行后，才能产生 `completion.verified`。
+`SessionView` 至少包含当前状态、目标、计划及 revision/变更原因、活动操作、最近错误及 category、验证结果、预算摘要、待审批事项、最后 sequence 和 `traceComplete`。计划 revision 必须严格递增且携带非空变更原因；完成声明不能绕过 `completion.claimed` 或活动操作检查；验证失败进入 `FAILED`。
 
-## 6. 功能需求
+模型/工具 started 与 completed/failed/cancelled 通过 `operationHash` 配对；未提供 hash 时回退到 span ID。`operation.unknown` 必须同时提供操作名称、外部身份和恢复建议，并进入 `UNKNOWN`；`operation.reconciled` 只有 `applied`/`not_applied` 才能回到 `RUNNING`，仍为 `unknown` 时继续阻断完成。
 
-- `EVENT-FR-001`：同一 Session 的 sequence 必须严格递增，重复 event ID 只能幂等返回，不能再次应用。
-- `EVENT-FR-002`：reducer 必须是无 I/O 纯函数，相同事件序列产生相同状态。
-- `EVENT-FR-003`：跨 Session 事件混合、未知破坏性 schema 和非法状态转换必须拒绝。
-- `EVENT-FR-004`：`UNKNOWN` 必须携带 operation name、外部身份和恢复建议。
-- `EVENT-FR-005`：计划更新保留 plan revision 和变更原因，不覆盖历史事件。
-- `EVENT-FR-006`：工具 started/finished 通过 operation hash 或 span ID 成对关联。
-- `EVENT-FR-007`：状态投影至少输出当前状态、计划、活动操作、最近错误、验证状态、预算摘要和待审批事项。
+## 5. 完整性、错误与恢复
 
-## 7. 并发与顺序
+`StateReducer` 增量应用要求第一个事实是 sequence 0 的 `session.created`，之后每次只能应用下一个序号且只能属于同一 Session。`reduceAgentEvents` 先调用 `checkTraceIntegrity`，因此乱序、重复 ID、跨 Session、未知主版本、缺口和非法状态转换都会拒绝投影而不修改事实。
 
-- MVP 由单写者为每个 Session 分配 sequence。
-- 并行只读工具可以拥有不同 span，但完成事件仍由单写者串行落库。
-- UI 可以消费流式事件，但最终显示必须以持久化事件重放结果为准。
-- 崩溃后 sequence 从数据库最大值继续，不得根据数组长度推断。
+`TraceIntegrityReport` 返回 `complete`、事件数量、Session、首个缺口、首个非法序号和第一个结构化错误。缺口以首个缺失 sequence 报告，崩溃恢复使用 EventStore 的 `latestSequence` 继续分配，不以数组长度推断。
 
-## 8. 错误与恢复
+## 6. 验收证据
 
-| 情况 | 行为 |
-| --- | --- |
-| 重复 event ID | 幂等忽略并返回已有事件 |
-| 相同 sequence 不同事件 | 数据完整性错误，停止 Session |
-| 缺失中间 sequence | 标记 trace 不完整，禁止完成 |
-| 未知事件次版本 | 保留事件并忽略新增可选字段 |
-| 未知事件主版本 | 停止恢复并要求迁移 |
-| reducer 异常 | 不修改事实事件，报告投影失败 |
+- `EVENT-AC-001`：`tests/state-reducer.test.ts` 与 `tests/state-reducer-contract.test.ts` 覆盖合法生命周期、非法转换、计划、审批、验证和完成门。
+- `EVENT-AC-002`：`state-reducer-contract.test.ts` 重放 10,000 条 `budget.updated`，比较批量和增量快照。
+- `EVENT-AC-003`：`event-store.test.ts` 覆盖重复/冲突/乱序/缺口；`state-reducer-contract.test.ts` 覆盖缺口、schema、跨 Session 和恢复归约。
+- `EVENT-AC-004`：契约测试覆盖模型/工具配对、审批请求/解决、验证 started/completed、完成 claim/verify/reject 及 UNKNOWN 显式恢复。
+- `EVENT-AC-005`：`checkTraceIntegrity` 契约断言首个缺失序号和结构化错误。
 
-## 9. 安全与隐私
-
-- `EVENT-SR-001`：事件不得包含 API Key、环境变量全集和原始 reasoning。
-- `EVENT-SR-002`：路径和参数摘要必须经过敏感字段处理。
-- `EVENT-SR-003`：安全否决、审批、取消和外部写事件不得被采样丢弃。
-
-## 10. 验收标准
-
-- `EVENT-AC-001`：覆盖全部合法状态转移和非法转移的表驱动测试。
-- `EVENT-AC-002`：一万条事件重放得到与增量 reducer 相同状态。
-- `EVENT-AC-003`：重复、乱序、缺口和崩溃恢复故障注入产生预期结果。
-- `EVENT-AC-004`：每个模型、工具、审批、验证和完成路径都有可关联的 started/finished 或显式中断事件。
-- `EVENT-AC-005`：关键 trace 完整性检查可确定指出缺失的首个事件。
-
-## 11. 实现任务建议
-
-1. 把事件类型与 payload schema 从单一 enum 拆成判别联合。
-2. 增加状态转换守卫、plan revision 和 budget projection。
-3. 定义 EventWriter 与 EventSubscriber 接口。
-4. 建立重放、非法转换、并行 span 和完整性测试。
-5. 交付给 C02 实现持久化，交付给 C13 实现视图 reducer。
+本组件已通过 `pnpm typecheck`、`pnpm test`；交付前仍需执行仓库统一门禁 `pnpm check` 和 `pnpm start -- --help`。SQLite EventStore、ArtifactStore 和 UI 视图仍按 C02/C13 计划实现，不在 C01 中用空实现提前标记完成。

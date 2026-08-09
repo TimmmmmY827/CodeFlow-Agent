@@ -21,7 +21,7 @@
 | ID | 组件文档 | 目标阶段 | 当前基线 | 硬依赖 | 主要下游 |
 | --- | --- | --- | --- | --- | --- |
 | C00 | [共享契约](00-shared-contracts.md) | D1–D2 | 部分存在 | 无 | 全部组件 |
-| C01 | [事件事实层与 StateReducer](01-event-state.md) | D1–D3 | 部分实现 | C00 | Storage、Loop、CLI、Trace、Eval |
+| C01 | [事件事实层与 StateReducer](01-event-state.md) | D1–D3 | 已实现 | C00 | Storage、Loop、CLI、Trace、Eval |
 | C02 | [存储与 ArtifactStore](02-storage-artifacts.md) | D7 | 仅 schema/interface | C00、C01 | Runtime、Session、Loop、Trace |
 | C03 | [PermissionEngine](03-permission-engine.md) | D1–D6 | 基础实现 | C00 | Runtime、Loop、CLI、发布工具 |
 | C04 | [BudgetController](04-budget-controller.md) | D3–D5 | 基础实现 | C00 | Loop、CLI、Eval |

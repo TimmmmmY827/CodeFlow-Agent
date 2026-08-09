@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import type { CodeSnapshot } from "../shared/contracts.js";
+
 export const completionClaimSchema = z.object({
   codeVersion: z.string().min(1),
   diffHash: z.string().min(1),
@@ -26,8 +28,8 @@ export const completionClaimSchema = z.object({
 export type CompletionClaim = z.infer<typeof completionClaimSchema>;
 
 export interface CompletionSnapshot {
-  readonly codeVersion: string;
-  readonly diffHash: string;
+  readonly codeVersion: NonNullable<CodeSnapshot["codeVersion"]>;
+  readonly diffHash: NonNullable<CodeSnapshot["diffHash"]>;
 }
 
 export interface CompletionDecision {

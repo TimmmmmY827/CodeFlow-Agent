@@ -2,6 +2,16 @@ import { Buffer } from "node:buffer";
 
 import type { PermissionEngine, ApprovalToken } from "../policy/permission-engine.js";
 import { createOperationHash } from "../policy/operation-hash.js";
+import {
+  cancellationFailure,
+  elapsedMilliseconds,
+  systemClock,
+  type SideEffectStatus,
+  type StableId,
+  type StructuredError,
+  type UtcTimestamp,
+} from "../shared/contracts.js";
+import { validateJsonValue, type JsonValue } from "../shared/json.js";
 import type { ArtifactReference, ArtifactStore } from "../storage/storage.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
@@ -13,19 +23,15 @@ export type ToolRuntimeStatus =
   | "cancelled"
   | "unknown";
 
-export interface ToolRuntimeError {
-  readonly category: string;
-  readonly message: string;
-  readonly retryable: boolean;
-}
+export type ToolRuntimeError = StructuredError;
 
 export interface ToolResultEnvelope {
   readonly toolName: string;
   readonly operationHash: string;
   readonly status: ToolRuntimeStatus;
   readonly durationMs: number;
-  readonly sideEffectStatus: "none" | "not_started" | "applied" | "unknown";
-  readonly output: unknown | null;
+  readonly sideEffectStatus: SideEffectStatus;
+  readonly output: JsonValue | null;
   readonly artifact: ArtifactReference | null;
   readonly error: ToolRuntimeError | null;
 }
@@ -35,10 +41,12 @@ export interface ToolExecutionRequest {
   readonly input: unknown;
   readonly workspace: string;
   readonly codeVersion: string | null;
+  readonly diffHash?: string | null;
   readonly configVersion: string;
   readonly signal: AbortSignal;
-  readonly sessionId: string;
-  readonly taskId: string;
+  readonly deadlineAt?: UtcTimestamp | null;
+  readonly sessionId: StableId;
+  readonly taskId: StableId;
   readonly taskWriteAuthorized: boolean;
   readonly approvalToken: ApprovalToken | null;
 }
@@ -93,11 +101,42 @@ export class ToolRuntime {
       );
     }
 
-    const operationHash = createOperationHash({
-      toolName: tool.name,
-      input: parsed.data,
-      codeVersion: request.codeVersion,
+    let operationHash: string;
+    try {
+      operationHash = createOperationHash({
+        toolName: tool.name,
+        input: parsed.data,
+        codeVersion: request.codeVersion,
+      });
+    } catch (error: unknown) {
+      return failure(
+        tool.name,
+        "",
+        0,
+        "not_json_serializable",
+        error instanceof Error ? error.message : String(error),
+        false,
+        "failed",
+        sideEffectBeforeExecution(tool.sideEffect),
+        "Use a JSON-serializable tool input schema.",
+      );
+    }
+    const cancellation = cancellationFailure({
+      signal: request.signal,
+      deadlineAt: request.deadlineAt ?? null,
     });
+    if (cancellation) {
+      return envelope(
+        tool.name,
+        operationHash,
+        "cancelled",
+        0,
+        sideEffectBeforeExecution(tool.sideEffect),
+        null,
+        null,
+        { ...cancellation, sideEffectStatus: sideEffectBeforeExecution(tool.sideEffect) },
+      );
+    }
     const permission = this.permissionEngine.decide(tool, {
       taskWriteAuthorized: request.taskWriteAuthorized,
       operationHash,
@@ -109,6 +148,8 @@ export class ToolRuntime {
         category: "approval_required",
         message: permission.reason,
         retryable: true,
+        sideEffectStatus: sideEffectBeforeExecution(tool.sideEffect),
+        recovery: "Obtain an approval bound to this exact operation before retrying.",
       });
     }
     if (permission.outcome === "deny") {
@@ -116,6 +157,8 @@ export class ToolRuntime {
         category: "permission_denied",
         message: permission.reason,
         retryable: false,
+        sideEffectStatus: sideEffectBeforeExecution(tool.sideEffect),
+        recovery: null,
       });
     }
     if (
@@ -127,26 +170,16 @@ export class ToolRuntime {
         category: "approval_already_consumed",
         message: "The single-use approval has already been consumed.",
         retryable: false,
+        sideEffectStatus: sideEffectBeforeExecution(tool.sideEffect),
+        recovery: "Reconcile the previous operation before requesting a new approval.",
       });
-    }
-    if (request.signal.aborted) {
-      return failure(
-        tool.name,
-        operationHash,
-        0,
-        "cancelled",
-        "Operation was cancelled.",
-        false,
-        "cancelled",
-        sideEffectBeforeExecution(tool.sideEffect),
-      );
     }
 
     if (tool.risk === "single_confirmation" && request.approvalToken) {
       this.#consumedApprovalIds.add(request.approvalToken.approvalId);
     }
 
-    const startedAt = performance.now();
+    const startedAt = systemClock.monotonicNowMs();
     await this.#notify({
       phase: "started",
       toolName: tool.name,
@@ -162,10 +195,12 @@ export class ToolRuntime {
         codeVersion: request.codeVersion,
         configVersion: request.configVersion,
         signal: request.signal,
+        deadlineAt: request.deadlineAt ?? null,
         sessionId: request.sessionId,
         taskId: request.taskId,
+        diffHash: request.diffHash ?? null,
       });
-      const durationMs = performance.now() - startedAt;
+      const durationMs = elapsedMilliseconds(startedAt, systemClock.monotonicNowMs());
       result = await this.#packageOutput(
         tool.name,
         operationHash,
@@ -175,7 +210,7 @@ export class ToolRuntime {
         tool.sideEffect === "none" ? "none" : "applied",
       );
     } catch (error: unknown) {
-      const durationMs = performance.now() - startedAt;
+      const durationMs = elapsedMilliseconds(startedAt, systemClock.monotonicNowMs());
       const cancelled = request.signal.aborted || isAbortError(error);
       const unknownSideEffect = tool.sideEffect !== "none";
       result = failure(
@@ -205,13 +240,36 @@ export class ToolRuntime {
     operationHash: string,
     durationMs: number,
     output: unknown,
-    sessionId: string,
+    sessionId: StableId,
     sideEffectStatus: "none" | "applied",
   ): Promise<ToolResultEnvelope> {
-    const serialized = JSON.stringify(output) ?? "null";
+    const validated = validateJsonValue(output);
+    if (!validated.ok) {
+      return failure(
+        toolName,
+        operationHash,
+        durationMs,
+        validated.error.category,
+        `${validated.error.message} at ${validated.error.path}`,
+        false,
+        "failed",
+        sideEffectStatus,
+        "Return a JSON-serializable tool result.",
+      );
+    }
+    const serialized = JSON.stringify(validated.value);
     const content = Buffer.from(serialized, "utf8");
     if (content.byteLength <= this.#maxInlineBytes) {
-      return envelope(toolName, operationHash, "completed", durationMs, sideEffectStatus, output, null, null);
+      return envelope(
+        toolName,
+        operationHash,
+        "completed",
+        durationMs,
+        sideEffectStatus,
+        validated.value,
+        null,
+        null,
+      );
     }
     if (!this.#artifactStore) {
       return failure(
@@ -246,11 +304,20 @@ function envelope(
   status: ToolRuntimeStatus,
   durationMs: number,
   sideEffectStatus: ToolResultEnvelope["sideEffectStatus"],
-  output: unknown | null,
+  output: JsonValue | null,
   artifact: ArtifactReference | null,
   error: ToolRuntimeError | null,
 ): ToolResultEnvelope {
-  return { toolName, operationHash, status, durationMs, sideEffectStatus, output, artifact, error };
+  return {
+    toolName,
+    operationHash,
+    status,
+    durationMs,
+    sideEffectStatus,
+    output,
+    artifact,
+    error,
+  };
 }
 
 function failure(
@@ -262,11 +329,14 @@ function failure(
   retryable: boolean,
   status: "failed" | "cancelled" | "unknown" = "failed",
   sideEffectStatus: ToolResultEnvelope["sideEffectStatus"] = "none",
+  recovery: string | null = null,
 ): ToolResultEnvelope {
   return envelope(toolName, operationHash, status, durationMs, sideEffectStatus, null, null, {
     category,
     message,
     retryable,
+    sideEffectStatus,
+    recovery,
   });
 }
 

@@ -46,8 +46,10 @@ describe("CompletionGate", () => {
     const result = await tool.execute(claim, {
       workspace: "C:/workspace",
       codeVersion: claim.codeVersion,
+      diffHash: claim.diffHash,
       configVersion: "config:v1",
       signal: new AbortController().signal,
+      deadlineAt: null,
       sessionId: "session-1",
       taskId: "task-1",
     });
