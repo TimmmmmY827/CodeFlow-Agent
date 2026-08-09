@@ -8,6 +8,7 @@ CodeFlow-Agent/
 │  ├─ agent/                # Agent 动态循环与任务生命周期
 │  ├─ app/                  # 依赖组装和应用用例
 │  ├─ cli/                  # Commander 命令和 Ink 视图
+│  ├─ completion/           # 完成声明、证据、安全否决和版本绑定
 │  ├─ context/              # 指令优先级与上下文装配
 │  ├─ eval/                 # 评估任务、验证器和对照契约
 │  ├─ events/               # 追加式事实事件和状态投影
@@ -15,7 +16,7 @@ CodeFlow-Agent/
 │  ├─ policy/               # 权限、批准和预算
 │  ├─ shared/               # 无业务依赖的通用类型
 │  ├─ storage/              # SQLite schema、仓储和 artifact
-│  ├─ tools/                # 工具定义、注册与运行边界
+│  ├─ tools/                # 工具定义、注册、运行时与内置工具
 │  └─ trace/                # 脱敏导出与可观察性
 └─ tests/                   # 跨组件确定性测试
 ```

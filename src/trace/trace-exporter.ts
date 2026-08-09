@@ -6,20 +6,27 @@ export function exportSanitizedTrace(events: readonly AgentEvent[]): string {
   return `${JSON.stringify(events.map(redactEvent), null, 2)}\n`;
 }
 
-function redactEvent(event: AgentEvent): AgentEvent {
-  return {
-    ...event,
-    payload: redactRecord(event.payload),
-  };
+function redactEvent(event: AgentEvent): unknown {
+  return redactRecord(event);
 }
 
 function redactRecord(value: Readonly<Record<string, unknown>>): Record<string, unknown> {
   return Object.fromEntries(
     Object.entries(value).map(([key, item]) => [
       key,
-      SENSITIVE_KEY.test(key) ? "[REDACTED]" : redactValue(item),
+      shouldRedact(key, item) ? "[REDACTED]" : redactValue(item),
     ]),
   );
+}
+
+function shouldRedact(key: string, value: unknown): boolean {
+  if ((key === "authorization" || key === "policy") && value && typeof value === "object") {
+    return false;
+  }
+  if (key === "authorizationId" || key === "approvalId") {
+    return false;
+  }
+  return SENSITIVE_KEY.test(key);
 }
 
 function redactValue(value: unknown): unknown {
