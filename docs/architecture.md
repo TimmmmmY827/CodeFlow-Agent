@@ -60,6 +60,19 @@ CREATED -> RUNNING -> WAITING_USER / WAITING_APPROVAL / VERIFYING
 
 `UNKNOWN` 专门表示 commit、push、PR 等外部写操作的真实状态不确定；恢复必须先对账，不能盲目重试。
 
+## 结构化审计上下文
+
+每条 `AgentEvent` 除事件专属 `payload` 外，还必须携带受 schema 约束的 `context`：
+
+- 工作区、代码版本和配置版本；
+- 模型/工具/控制操作的名称、状态和耗时；
+- token、缓存与费用用量；
+- 风险级别、任务授权和单次批准引用；
+- 错误类别、可重试性与恢复建议；
+- 副作用状态，包括外部结果未知的 `unknown`。
+
+这些字段用于任务树、成本归因、安全审计和恢复判断，不能依赖各事件自行约定 `payload` 键名。事件特有结果仍可放入 `payload`，长输出由 `ToolRuntime` 转为 `ArtifactReference`。
+
 ## 未来扩展缝
 
 - `ModelAdapter`：增加模型供应商。

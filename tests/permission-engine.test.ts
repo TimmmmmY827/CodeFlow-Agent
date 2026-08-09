@@ -32,9 +32,28 @@ describe("PermissionEngine", () => {
         taskWriteAuthorized: true,
         operationHash: "current-hash",
         approvalToken: {
+          approvalId: "approval-1",
           toolName: "commit_push_create_pr",
           operationHash: "old-hash",
           expiresAt: "2999-01-01T00:00:00.000Z",
+        },
+      },
+    );
+
+    expect(decision.outcome).toBe("deny");
+  });
+
+  it("rejects an approval with an invalid expiration", () => {
+    const decision = new PermissionEngine().decide(
+      tool("commit_push_create_pr", "single_confirmation"),
+      {
+        taskWriteAuthorized: true,
+        operationHash: "operation-hash",
+        approvalToken: {
+          approvalId: "approval-2",
+          toolName: "commit_push_create_pr",
+          operationHash: "operation-hash",
+          expiresAt: "not-a-date",
         },
       },
     );
@@ -47,6 +66,8 @@ function tool(name: string, risk: ToolRisk): ToolDefinition<Record<string, never
   return {
     name,
     risk,
+    sideEffect: "none",
+    retryPolicy: "safe",
     description: name,
     inputSchema: z.object({}),
     execute: async () => undefined,

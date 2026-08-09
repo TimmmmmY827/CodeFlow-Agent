@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { createAgentEvent } from "../events/agent-event.js";
+import { createAgentEvent, createEventContext } from "../events/agent-event.js";
 import type { EventStore } from "../events/event-store.js";
 
 export interface CreateSessionRequest {
@@ -28,6 +28,7 @@ export class AgentEventLoop {
         traceId,
         sequence: 0,
         type: "session.created",
+        context: createEventContext({ workspacePath: request.workspace }),
         payload: { goal: request.goal, workspace: request.workspace },
       }),
     );

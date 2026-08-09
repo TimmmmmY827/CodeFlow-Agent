@@ -1,5 +1,7 @@
 # 两周 MVP 路线图
 
+> 2026-08-09 覆盖度审查后，生命周期和结构化事件契约已先行修正；`ToolRuntime`、operation hash、`CompletionGate` 与 `finish_task` 契约也已提前建立。它们仍需在 D2–D4 与模型工具调用、真实工具、事件循环和代码快照实现接通，不能仅凭组件存在宣称闭环可用。
+
 | 日程 | 主组件 | 可验证交付物 |
 | --- | --- | --- |
 | D1 | CLI、配置、事件、SQLite schema | `codeflow --help`、类型检查、基础测试 |

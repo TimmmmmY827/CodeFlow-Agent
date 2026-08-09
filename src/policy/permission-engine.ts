@@ -6,6 +6,7 @@ export interface PermissionSubject {
 }
 
 export interface ApprovalToken {
+  readonly approvalId: string;
   readonly toolName: string;
   readonly operationHash: string;
   readonly expiresAt: string;
@@ -42,10 +43,17 @@ export class PermissionEngine {
     if (!token || !context.operationHash) {
       return { outcome: "confirm", reason: "This operation needs a single-use confirmation." };
     }
+    if (!token.approvalId.trim()) {
+      return { outcome: "deny", reason: "The approval identifier is invalid." };
+    }
     if (token.toolName !== toolName || token.operationHash !== context.operationHash) {
       return { outcome: "deny", reason: "The approval is bound to different operation parameters." };
     }
-    if (Date.parse(token.expiresAt) <= Date.now()) {
+    const expiresAt = Date.parse(token.expiresAt);
+    if (!Number.isFinite(expiresAt)) {
+      return { outcome: "deny", reason: "The approval expiration is invalid." };
+    }
+    if (expiresAt <= Date.now()) {
       return { outcome: "confirm", reason: "The approval has expired." };
     }
     return { outcome: "allow", reason: "A matching, unexpired approval is present." };

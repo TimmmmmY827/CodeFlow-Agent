@@ -3,8 +3,10 @@ import type { AgentEvent } from "./agent-event.js";
 export type SessionLifecycle =
   | "CREATED"
   | "RUNNING"
+  | "WAITING_USER"
   | "WAITING_APPROVAL"
   | "VERIFYING"
+  | "COMPLETION_CLAIMED"
   | "COMPLETION_VERIFIED"
   | "CANCELLING"
   | "CANCELLED"
@@ -60,6 +62,10 @@ function applyEvent(view: SessionView, event: AgentEvent): SessionView {
       return { ...base, status: "RUNNING" };
     case "plan.updated":
       return { ...base, plan: readStringArray(event.payload, "steps") };
+    case "user.input.requested":
+      return { ...base, status: "WAITING_USER" };
+    case "user.input.received":
+      return { ...base, status: "RUNNING" };
     case "model.started":
       return { ...base, status: "RUNNING", activeOperation: "model" };
     case "model.completed":
@@ -90,6 +96,22 @@ function applyEvent(view: SessionView, event: AgentEvent): SessionView {
         status: readBoolean(event.payload, "passed") ? "RUNNING" : "FAILED",
         verificationPassed: readBoolean(event.payload, "passed"),
       };
+    case "completion.claimed":
+      return { ...base, status: "COMPLETION_CLAIMED" };
+    case "completion.verified":
+      return { ...base, status: "COMPLETION_VERIFIED", activeOperation: null };
+    case "completion.rejected":
+      return {
+        ...base,
+        status: "RUNNING",
+        lastError: readString(event.payload, "reason") ?? "Completion claim was rejected",
+      };
+    case "operation.unknown":
+      return {
+        ...base,
+        status: "UNKNOWN",
+        activeOperation: event.context.operation?.name ?? view.activeOperation,
+      };
     case "session.cancelling":
       return { ...base, status: "CANCELLING" };
     case "session.cancelled":
@@ -101,8 +123,6 @@ function applyEvent(view: SessionView, event: AgentEvent): SessionView {
         activeOperation: null,
         lastError: readString(event.payload, "message") ?? "Session failed",
       };
-    case "session.completed":
-      return { ...base, status: "COMPLETION_VERIFIED", activeOperation: null };
   }
 }
 
