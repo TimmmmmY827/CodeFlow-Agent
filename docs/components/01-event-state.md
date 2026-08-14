@@ -57,6 +57,10 @@ function checkTraceIntegrity(events: readonly unknown[]): TraceIntegrityReport;
 
 `InMemoryEventStore` 是 C01 的可替换事实存储和流式订阅替身。它允许缺口被记录，以便完整性检查明确报出缺失事实；相同 event ID 且内容相同返回 `duplicate`，内容不同或序号不递增返回 `EventStoreError`，不会覆盖已有事实。读取和订阅返回副本，监听器失败不影响事实追加。
 
+所有 provider 在读取和订阅边界统一校验 Session UUID、增量游标和 listener；无效输入返回稳定的 `EventStoreError` 分类，不能因内存或 SQLite provider 不同而泄漏 Zod/SQLite 错误。
+
+所有持久化 EventStore 实现必须遵循同一 append 语义：sequence 需要相对已存最后一条严格递增，但允许缺口；相同 Session+sequence 不能被另一事件占用。C02 不得在 SQLite provider 中私自收紧为 `last + 1`。订阅与分页的无竞态扩展需先升级本契约，不能只成为某个 provider 的私有语义。
+
 ## 4. 生命周期与投影
 
 ```mermaid

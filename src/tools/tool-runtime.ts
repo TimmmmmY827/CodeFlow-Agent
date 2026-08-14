@@ -12,7 +12,7 @@ import {
   type UtcTimestamp,
 } from "../shared/contracts.js";
 import { validateJsonValue, type JsonValue } from "../shared/json.js";
-import type { ArtifactReference, ArtifactStore } from "../storage/storage.js";
+import type { ArtifactReference, ArtifactWriter } from "../storage/storage.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
 export type ToolRuntimeStatus =
@@ -60,14 +60,14 @@ export interface ToolRuntimeEvent {
 }
 
 export interface ToolRuntimeOptions {
-  readonly artifactStore?: ArtifactStore;
+  readonly artifactStore?: ArtifactWriter;
   readonly maxInlineBytes?: number;
   readonly observe?: (event: ToolRuntimeEvent) => void | Promise<void>;
 }
 
 export class ToolRuntime {
   readonly #consumedApprovalIds = new Set<string>();
-  readonly #artifactStore: ArtifactStore | null;
+  readonly #artifactStore: ArtifactWriter | null;
   readonly #maxInlineBytes: number;
   readonly #observe: ((event: ToolRuntimeEvent) => void | Promise<void>) | null;
 

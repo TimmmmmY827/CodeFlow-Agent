@@ -18,6 +18,7 @@ import {
   elapsedMilliseconds,
   stableIdSchema,
   structuredErrorSchema,
+  utcTimestampSchema,
   usageRecordSchema,
   versionIdentifierSchema,
   type CancellationContext,
@@ -74,7 +75,7 @@ describe("shared contracts", () => {
           relativePath: "session/result.json",
           mediaType: "application/json",
           byteLength: 42,
-          sha256: "sha256:abc123",
+          sha256: `sha256:${"a".repeat(64)}`,
           sensitivity: "normal",
         },
       ],
@@ -158,6 +159,9 @@ describe("shared contracts", () => {
     );
     expect(elapsedMilliseconds(100.25, 112.75)).toBe(12.5);
     expect(() => elapsedMilliseconds(10, 9)).toThrow(RangeError);
+    expect(utcTimestampSchema.safeParse("2026-08-09T12:34:56Z").success).toBe(false);
+    expect(utcTimestampSchema.safeParse("2026-08-09T12:34:56.7Z").success).toBe(false);
+    expect(utcTimestampSchema.safeParse("2026-08-09T12:34:56.7890Z").success).toBe(false);
   });
 
   it("passes one AbortSignal unchanged from Application to model, tool and subprocess", async () => {

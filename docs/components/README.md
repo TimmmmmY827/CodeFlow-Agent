@@ -29,7 +29,7 @@
 | --- | --- | --- | --- | --- | --- |
 | C00 | [共享契约](00-shared-contracts.md) | D1–D2 | 已实现 | 无 | 全部组件 |
 | C01 | [事件事实层与 StateReducer](01-event-state.md) | D1–D3 | 已实现 | C00 | Storage、Loop、CLI、Trace、Eval |
-| C02 | [存储与 ArtifactStore](02-storage-artifacts.md) | D7 | 内存接口；SQLite/File 实现缺失 | C00、C01 | Runtime、Session、Loop、Trace |
+| C02 | [存储与 ArtifactStore](02-storage-artifacts.md) | D7 | 核心持久化、可续跑物理删除、保留与恢复检查已实现；C08/C11 journal 和原生 Windows 路径加固延期 | C00、C01 | Runtime、Session、Loop、Trace |
 | C03 | [PermissionEngine](03-permission-engine.md) | D1–D6 | 基础实现 | C00 | Runtime、Loop、CLI、发布工具 |
 | C04 | [BudgetController](04-budget-controller.md) | D3–D5 | 基础实现 | C00 | Loop、CLI、Eval |
 | C05 | [ModelAdapter](05-model-adapter.md) | D2 | 最小非流式实现 | C00、C01 | Context、Loop、成本账本 |
@@ -156,6 +156,7 @@ flowchart LR
 - operation ID、attempt、operation hash、idempotency key 和 provider external ID 含义不同，禁止复用一个字符串代替。
 - 涉及数据库、文件或外部 Provider 的组件必须列出可注入崩溃切点，以及每个切点恢复后的合法状态集合。
 - `UNKNOWN` 不是普通失败或可重试状态，只能通过可信只读对账转为 applied/not_applied，或保持阻塞。
+- C01 EventStore provider 必须运行同一套契约测试；sequence gap、duplicate/conflict、增量读取和 listener 语义不得因内存/SQLite 实现而变化。
 
 ## 变更控制
 

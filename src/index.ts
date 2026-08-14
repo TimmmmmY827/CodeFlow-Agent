@@ -58,6 +58,7 @@ export { BudgetController } from "./policy/budget-controller.js";
 export { PermissionEngine } from "./policy/permission-engine.js";
 export { createOperationHash } from "./policy/operation-hash.js";
 export * from "./shared/index.js";
+export * from "./storage/storage.js";
 export { ToolRegistry } from "./tools/tool-registry.js";
 export { ToolRuntime } from "./tools/tool-runtime.js";
 export { createFinishTaskTool } from "./tools/builtin/finish-task.js";

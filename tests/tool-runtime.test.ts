@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { PermissionEngine } from "../src/policy/permission-engine.js";
 import { createOperationHash } from "../src/policy/operation-hash.js";
-import type { ArtifactStore } from "../src/storage/storage.js";
+import type { ArtifactWriter } from "../src/storage/storage.js";
 import { ToolRegistry } from "../src/tools/tool-registry.js";
 import { ToolRuntime, type ToolExecutionRequest } from "../src/tools/tool-runtime.js";
 
@@ -116,16 +116,15 @@ describe("ToolRuntime", () => {
       inputSchema: z.object({ command: z.string() }),
       execute: async () => ({ stdout: "x".repeat(200) }),
     });
-    const artifactStore: ArtifactStore = {
+    const artifactStore: ArtifactWriter = {
       write: async (_sessionId, mediaType, content, sensitivity) => ({
         artifactId: "artifact-1",
         relativePath: "session/output.json",
         mediaType,
         byteLength: content.byteLength,
-        sha256: "sha256:test",
+        sha256: `sha256:${"a".repeat(64)}`,
         sensitivity,
       }),
-      deleteSessionArtifacts: async () => undefined,
     };
     const runtime = new ToolRuntime(registry, new PermissionEngine(), {
       artifactStore,

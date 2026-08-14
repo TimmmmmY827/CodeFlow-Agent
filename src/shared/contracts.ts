@@ -11,8 +11,11 @@ export type StableId = z.infer<typeof stableIdSchema>;
 
 export const utcTimestampSchema = z
   .string()
-  .datetime({ offset: false })
-  .refine((value) => value.endsWith("Z"), "Timestamp must use UTC (Z) notation.");
+  .regex(
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    "Timestamp must use YYYY-MM-DDTHH:mm:ss.sssZ.",
+  )
+  .datetime({ offset: false, precision: 3 });
 export type UtcTimestamp = z.infer<typeof utcTimestampSchema>;
 
 export const schemaVersionSchema = z.number().int().positive();
@@ -96,7 +99,7 @@ export const artifactReferenceSchema = z
     relativePath: z.string().min(1),
     mediaType: z.string().min(1),
     byteLength: z.number().int().nonnegative(),
-    sha256: z.string().min(1),
+    sha256: z.string().regex(/^sha256:[0-9a-f]{64}$/, "Expected a canonical SHA-256 digest."),
     sensitivity: z.enum(["normal", "sensitive"]),
   });
 export type ArtifactReference = z.infer<typeof artifactReferenceSchema>;

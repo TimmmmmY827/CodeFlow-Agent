@@ -29,7 +29,7 @@
 ```ts
 type StableId = string; // 生成后不可变，MVP 使用 UUID
 type SchemaVersion = number; // 正整数表示 schema 主版本
-type UtcTimestamp = string; // 规范输出使用 ISO-8601 的 Z 时区形式
+type UtcTimestamp = string; // 固定为 YYYY-MM-DDTHH:mm:ss.sssZ
 type VersionIdentifier = string; // 稳定的 namespace:value，例如 config:v1
 
 interface CodeSnapshot {
@@ -69,7 +69,7 @@ interface CancellationContext {
 ## 4. 功能需求
 
 - `SHARED-FR-001`：ID 在创建点生成，不得由显示名称、路径或数组下标代替。
-- `SHARED-FR-002`：所有持久化时间使用 UTC ISO-8601；耗时使用单调时钟毫秒值。
+- `SHARED-FR-002`：所有持久化时间使用固定毫秒精度的 UTC ISO-8601（`YYYY-MM-DDTHH:mm:ss.sssZ`）；该规范格式保证数据库可安全按文本比较和排序。耗时使用单调时钟毫秒值。
 - `SHARED-FR-003`：每个顶层可持久化 schema 带独立主版本，读取方拒绝未知的破坏性版本；嵌套记录由所属信封版本管理。
 - `SHARED-FR-004`：`codeVersion` 与 `diffHash` 分开保存；未初始化 Git 的工作区使用明确的工作区版本策略，不能填假 HEAD。
 - `SHARED-FR-005`：已知成本以美元数值记录，未知成本使用 `null`；同时保留 JSON 化的供应商原始 usage 供重新计价。
