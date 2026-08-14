@@ -281,6 +281,9 @@ describe("FileArtifactDeleter", () => {
     const receipt = await service.delete(bundle.session.sessionId);
 
     expect(receipt.status).toBe("failed");
+    expect(receipt.error).toEqual(expect.objectContaining({
+      category: "artifact_session_directory_not_empty",
+    }));
     expect(receipt.items).toContainEqual(expect.objectContaining({
       status: "failed",
       error: expect.objectContaining({ category: "artifact_session_directory_not_empty" }),

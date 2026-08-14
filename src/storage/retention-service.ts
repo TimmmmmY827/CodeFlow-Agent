@@ -114,13 +114,15 @@ export class RetentionService {
   #scan(cutoffAt: UtcTimestamp): readonly EligibleSession[] {
     return this.#database
       .prepare(`
-SELECT session_id, expires_at
+SELECT session_id, COALESCE(expires_at, updated_at) AS retention_reference_at
 FROM sessions
-WHERE pinned = 0
-  AND expires_at IS NOT NULL
-  AND expires_at <= ?
-  AND (
-    deletion_state = 'active'
+WHERE (
+    (
+      deletion_state = 'active'
+      AND pinned = 0
+      AND expires_at IS NOT NULL
+      AND expires_at <= ?
+    )
     OR (
       deletion_state = 'deleting'
       AND EXISTS (
@@ -135,11 +137,11 @@ WHERE pinned = 0
       )
     )
   )
-ORDER BY expires_at, session_id`)
+ORDER BY retention_reference_at, session_id`)
       .all(cutoffAt)
       .map((row) => ({
         sessionId: stableIdSchema.parse(row.session_id),
-        expiresAt: utcTimestampSchema.parse(row.expires_at),
+        expiresAt: utcTimestampSchema.parse(row.retention_reference_at),
       }));
   }
 
@@ -172,6 +174,7 @@ interface EligibleSession {
 }
 
 function incompleteReceiptError(receipt: DeleteReceipt): StructuredError {
+  if (receipt.error !== null) return receipt.error;
   const itemError = receipt.items.find((item) => item.status === "failed")?.error;
   return itemError ?? {
     category: "delete_incomplete",

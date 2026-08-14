@@ -118,6 +118,7 @@ CREATE TABLE delete_receipts (
   status TEXT NOT NULL CHECK (status IN ('in_progress', 'complete', 'failed')),
   started_at TEXT NOT NULL CHECK (length(started_at) = 24 AND started_at GLOB '????-??-??T??:??:??.???Z'),
   completed_at TEXT CHECK (completed_at IS NULL OR (length(completed_at) = 24 AND completed_at GLOB '????-??-??T??:??:??.???Z')),
+  error_json TEXT,
   UNIQUE(session_id)
 );
 

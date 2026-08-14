@@ -7,9 +7,12 @@ import type { AgentEvent } from "../events/agent-event.js";
 import {
   artifactReferenceSchema,
   stableIdSchema,
+  structuredErrorSchema,
+  utcTimestampSchema,
   type ArtifactReference,
   type StableId,
   type StructuredError,
+  type UtcTimestamp,
 } from "../shared/contracts.js";
 import { STORAGE_RECORD_SCHEMA_VERSION } from "./contracts.js";
 import type { SqliteStorageDatabase } from "./sqlite/sqlite-database.js";
@@ -52,6 +55,13 @@ export interface RecoveryDeletionStatus {
   readonly receiptStatus: "none" | "missing" | "in_progress" | "complete" | "failed";
   readonly pendingItems: number;
   readonly failedItems: number;
+  readonly errors: readonly StructuredError[];
+}
+
+export interface PendingPhysicalPurge {
+  readonly receiptId: StableId;
+  readonly completedAt: UtcTimestamp;
+  readonly error: StructuredError | null;
 }
 
 export interface StorageRecoveryReport {
@@ -69,6 +79,7 @@ export interface StorageRecoveryReport {
   readonly corruptArtifacts: readonly RecoveryArtifactIssue[];
   readonly unreadyArtifacts: readonly RecoveryArtifactIssue[];
   readonly deletion: RecoveryDeletionStatus;
+  readonly pendingPhysicalPurges: readonly PendingPhysicalPurge[];
   readonly externalOperations: {
     readonly capability: "unavailable";
     readonly operations: readonly [];
@@ -104,12 +115,33 @@ export class StorageRecoveryInspector {
         corruptArtifacts: artifacts.corrupt,
         unreadyArtifacts: artifacts.unready,
         deletion: this.#inspectDeletion(checkedSessionId, session.deletionState),
+        pendingPhysicalPurges: this.inspectPendingPhysicalPurges(),
         externalOperations: {
           capability: "unavailable",
           operations: [],
           reason: EXTERNAL_OPERATION_UNAVAILABLE_REASON,
         },
       };
+    } catch (error: unknown) {
+      if (error instanceof StorageError) throw error;
+      throw translateStorageError(error);
+    }
+  }
+
+  inspectPendingPhysicalPurges(): readonly PendingPhysicalPurge[] {
+    try {
+      return this.#storage.database
+        .prepare(`
+SELECT receipt_id, completed_at, purge_error_json
+FROM deleted_session_tombstones
+WHERE purge_state = 'pending'
+ORDER BY completed_at, receipt_id`)
+        .all()
+        .map((row) => ({
+          receiptId: stableIdSchema.parse(row.receipt_id),
+          completedAt: utcTimestampSchema.parse(row.completed_at),
+          error: parseStoredError(row.purge_error_json, "tombstone purge_error_json"),
+        }));
     } catch (error: unknown) {
       if (error instanceof StorageError) throw error;
       throw translateStorageError(error);
@@ -249,8 +281,14 @@ FROM artifacts WHERE session_id = ? ORDER BY artifact_id`)
   ): RecoveryDeletionStatus {
     const row = this.#storage.database
       .prepare(`
-SELECT receipt_id, status FROM delete_receipts
-WHERE session_id = ? ORDER BY started_at DESC, receipt_id DESC LIMIT 1`)
+SELECT receipt_id, status, error_json FROM delete_receipts
+WHERE session_id = ?
+  AND EXISTS (
+    SELECT 1 FROM delete_receipt_items
+    WHERE delete_receipt_items.receipt_id = delete_receipts.receipt_id
+      AND delete_receipt_items.target = 'session'
+  )
+ORDER BY started_at DESC, receipt_id DESC LIMIT 1`)
       .get(sessionId);
     if (!row) {
       return {
@@ -259,25 +297,36 @@ WHERE session_id = ? ORDER BY started_at DESC, receipt_id DESC LIMIT 1`)
         receiptStatus: sessionDeletionState === "deleting" ? "missing" : "none",
         pendingItems: 0,
         failedItems: 0,
+        errors: [],
       };
     }
     if (typeof row.receipt_id !== "string" ||
         (row.status !== "in_progress" && row.status !== "complete" && row.status !== "failed")) {
       throw corruptStorage("Delete receipt identity or status is invalid.");
     }
-    const counts = this.#storage.database
+    const itemRows = this.#storage.database
       .prepare(`
-SELECT
-  SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_items,
-  SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_items
+SELECT status, error_json
 FROM delete_receipt_items WHERE receipt_id = ?`)
-      .get(row.receipt_id);
+      .all(row.receipt_id);
+    let pendingItems = 0;
+    let failedItems = 0;
+    const errors: StructuredError[] = [];
+    const receiptError = parseStoredError(row.error_json, "delete receipt error_json");
+    if (receiptError !== null) appendUniqueError(errors, receiptError);
+    for (const item of itemRows) {
+      if (item.status === "pending") pendingItems += 1;
+      if (item.status === "failed") failedItems += 1;
+      const error = parseStoredError(item.error_json, "delete item error_json");
+      if (error !== null) appendUniqueError(errors, error);
+    }
     return {
       sessionDeletionState,
       receiptId: stableIdSchema.parse(row.receipt_id),
       receiptStatus: row.status,
-      pendingItems: readCount(counts?.pending_items, "pending deletion items"),
-      failedItems: readCount(counts?.failed_items, "failed deletion items"),
+      pendingItems,
+      failedItems,
+      errors,
     };
   }
 }
@@ -334,14 +383,6 @@ function readNonnegativeIntegerOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
-function readCount(value: unknown, label: string): number {
-  if (value === null || value === undefined) return 0;
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw corruptStorage(`${label} is invalid.`);
-  }
-  return value;
-}
-
 function errorDetails(error: unknown): StructuredError {
   if (error instanceof StorageError) return error.details;
   return translateStorageError(error).details;
@@ -364,4 +405,25 @@ function storageDetails(category: string, message: string, recovery: string): St
     sideEffectStatus: "none",
     recovery,
   };
+}
+
+function parseStoredError(value: unknown, label: string): StructuredError | null {
+  if (value === null) return null;
+  if (typeof value !== "string") throw corruptStorage(`${label} is not JSON text.`);
+  try {
+    const parsed = structuredErrorSchema.safeParse(JSON.parse(value));
+    if (!parsed.success) throw corruptStorage(`${label} is not a StructuredError.`);
+    return parsed.data;
+  } catch (error: unknown) {
+    if (error instanceof StorageError) throw error;
+    throw corruptStorage(`${label} is invalid JSON.`);
+  }
+}
+
+function appendUniqueError(errors: StructuredError[], candidate: StructuredError): void {
+  if (errors.some((error) =>
+    error.category === candidate.category &&
+    error.message === candidate.message &&
+    error.sideEffectStatus === candidate.sideEffectStatus)) return;
+  errors.push(candidate);
 }

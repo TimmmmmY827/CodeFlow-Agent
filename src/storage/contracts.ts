@@ -96,6 +96,8 @@ export interface DeleteReceipt {
   readonly status: "in_progress" | "complete" | "failed";
   readonly startedAt: UtcTimestamp;
   readonly completedAt: UtcTimestamp | null;
+  /** Coordinator-level failure not attributable to one delete item. */
+  readonly error: StructuredError | null;
   readonly items: readonly DeleteReceiptItem[];
 }
 

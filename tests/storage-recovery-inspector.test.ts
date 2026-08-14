@@ -130,26 +130,35 @@ describe("StorageRecoveryInspector", () => {
       .run(sessionId);
     testContext.database.database.prepare(`
 INSERT INTO delete_receipts(
-  receipt_id, schema_version, session_id, status, started_at, completed_at
-) VALUES (?, 1, ?, 'failed', ?, NULL)`)
-      .run(receiptId, sessionId, NOW);
+  receipt_id, schema_version, session_id, status, started_at, completed_at, error_json
+) VALUES (?, 1, ?, 'failed', ?, NULL, ?)`)
+      .run(receiptId, sessionId, NOW, JSON.stringify({
+        category: "artifact_session_directory_not_empty",
+        message: "unknown directory entry",
+        retryable: false,
+        sideEffectStatus: "none",
+        recovery: "Inspect the Artifact Session directory.",
+      }));
     testContext.database.database.prepare(`
 INSERT INTO delete_receipt_items(
   receipt_id, ordinal, target, reference_hash, status, error_json
 ) VALUES (?, 0, 'artifact_file', ?, 'pending', NULL),
-         (?, 1, 'artifact_metadata', ?, 'failed', ?)`)
+         (?, 1, 'artifact_metadata', ?, 'failed', ?),
+         (?, 2, 'session', ?, 'pending', NULL)`)
       .run(
         receiptId,
         `sha256:${"1".repeat(64)}`,
         receiptId,
         `sha256:${"2".repeat(64)}`,
         JSON.stringify({
-          category: "storage_io_failed",
-          message: "locked",
-          retryable: true,
-          sideEffectStatus: "none",
-          recovery: "Retry deletion.",
+          category: "deletion_reference_lost",
+          message: "Artifact metadata is unavailable.",
+          retryable: false,
+          sideEffectStatus: "unknown",
+          recovery: "Restore the Artifact metadata.",
         }),
+        receiptId,
+        `sha256:${"3".repeat(64)}`,
       );
 
     const report = await testContext.inspector.inspect(sessionId);
@@ -158,8 +167,12 @@ INSERT INTO delete_receipt_items(
       sessionDeletionState: "deleting",
       receiptId,
       receiptStatus: "failed",
-      pendingItems: 1,
+      pendingItems: 2,
       failedItems: 1,
+      errors: [
+        expect.objectContaining({ category: "artifact_session_directory_not_empty" }),
+        expect.objectContaining({ category: "deletion_reference_lost" }),
+      ],
     });
     expect(report.externalOperations).toMatchObject({ capability: "unavailable", operations: [] });
   });
@@ -177,6 +190,35 @@ INSERT INTO delete_receipt_items(
         receiptStatus: "missing",
       },
     });
+  });
+
+  it("surfaces pending physical purge tombstones in global and Session recovery reports", async () => {
+    const testContext = await createDefaultFixture();
+    const receiptId = randomUUID();
+    const purgeError = {
+      category: "physical_purge_pending",
+      message: "reader holds the WAL",
+      retryable: true,
+      sideEffectStatus: "none" as const,
+      recovery: "Close the reader and retry.",
+    };
+    testContext.database.database.prepare(`
+INSERT INTO deleted_session_tombstones(
+  receipt_id, schema_version, session_id_hash, requested_at, completed_at,
+  final_status, target_counts_json, purge_state, purge_error_json
+) VALUES (?, 1, ?, ?, ?, 'complete', '{}', 'pending', ?)`)
+      .run(
+        receiptId,
+        `sha256:${"4".repeat(64)}`,
+        NOW,
+        NOW,
+        JSON.stringify(purgeError),
+      );
+
+    const expected = [{ receiptId, completedAt: NOW, error: purgeError }];
+    expect(testContext.inspector.inspectPendingPhysicalPurges()).toEqual(expected);
+    await expect(testContext.inspector.inspect(testContext.bundle.session.sessionId))
+      .resolves.toMatchObject({ pendingPhysicalPurges: expected });
   });
 });
 

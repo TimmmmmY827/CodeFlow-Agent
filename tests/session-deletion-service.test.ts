@@ -518,6 +518,15 @@ END;`);
     expect(storage.database.prepare(`
 SELECT purge_state FROM deleted_session_tombstones`).get()).toEqual({ purge_state: "pending" });
 
+    const inspectionOpen = new SqliteStorageDatabase(databasePath, {
+      clock: { utcNow: () => NOW, monotonicNowMs: () => 0 },
+      busyTimeoutMs: 1,
+    });
+    openDatabases.push(inspectionOpen);
+    expect(inspectionOpen.database.prepare(`
+SELECT purge_state FROM deleted_session_tombstones`).get()).toEqual({ purge_state: "pending" });
+    inspectionOpen.close();
+
     reader.exec("ROLLBACK");
     reader.close();
     storage.close();

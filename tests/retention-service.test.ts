@@ -54,7 +54,7 @@ describe("RetentionService", () => {
     expect(report.items.map((item) => item.status)).toEqual(["deleted", "deleted", "deleted"]);
   });
 
-  it("includes the exact expiry boundary and skips future, pinned, null-expiry and non-resumable deleting Sessions", async () => {
+  it("applies expiry/pin only before deletion and always resumes durable deleting Sessions", async () => {
     const storage = database();
     const boundary = insertSession(storage, randomUUID(), NOW);
     insertSession(storage, randomUUID(), "2026-08-12T12:00:00.001Z");
@@ -84,8 +84,8 @@ describe("RetentionService", () => {
 
     const report = await service.run();
 
-    expect(calls).toEqual([boundary]);
-    expect(report).toMatchObject({ scanned: 1, deleted: 1, failed: 0 });
+    expect(calls).toEqual([pinnedDeleting, boundary, futureDeleting]);
+    expect(report).toMatchObject({ scanned: 3, deleted: 3, failed: 0 });
   });
 
   it("isolates thrown and incomplete deletion failures and continues later Sessions", async () => {
@@ -360,6 +360,7 @@ function completeReceipt(sessionId: StableId): DeleteReceipt {
     status: "complete",
     startedAt: NOW,
     completedAt: NOW,
+    error: null,
     items: [],
   };
 }
@@ -379,6 +380,7 @@ function failedReceipt(sessionId: StableId): DeleteReceipt {
     status: "failed",
     startedAt: NOW,
     completedAt: null,
+    error,
     items: [{ target: "artifact_file", referenceHash: "sha256:file", status: "failed", error }],
   };
 }

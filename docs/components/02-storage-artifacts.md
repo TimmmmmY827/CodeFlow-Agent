@@ -5,6 +5,7 @@
 - 代码位置：`src/storage/`、`src/events/event-store.ts`
 - 测试位置：`tests/sqlite-*.test.ts`、`tests/file-artifact-store.test.ts`、`tests/artifact-file-deleter.test.ts`、`tests/session-deletion-service.test.ts`、`tests/retention-service.test.ts`、`tests/storage-recovery-inspector.test.ts`
 - 硬依赖：[C00](00-shared-contracts.md)、[C01](01-event-state.md)
+- 参考 ADR：[ADR-0004](../decisions/0004-node-sqlite-storage-runtime.md)
 - 下游消费者：C08、C10、C11、C12、C14、C15
 
 ## 1. 目标
@@ -146,6 +147,7 @@ interface DeleteReceipt {
   status: "in_progress" | "complete" | "failed";
   startedAt: UtcTimestamp;
   completedAt: UtcTimestamp | null;
+  error: StructuredError | null;
   items: DeleteReceiptItem[];
 }
 
@@ -205,7 +207,7 @@ C01 是 `EventStore` 语义接口和 `AgentEvent` schema 的唯一所有者；C0
 
 `WorkspaceRecord`、Session 输入/记录/筛选/摘要、`ArtifactRecord` 和 `DeleteReceipt` 由 C02 拥有，C12/C14 只能导入，不得在下游重新定义。所有顶层记录都带独立主版本；cursor 是不透明、版本化且绑定筛选条件的值。删除首次完成时返回内存中的完整逐项 receipt；完成后持久 work record 会被压缩，重复删除只返回相同 receipt ID、时间和终态且 `items = []` 的墓碑摘要。
 `ToolRuntime` 只依赖最小 `ArtifactWriter`；完整 `ArtifactStore` 负责写、读、校验和崩溃恢复，但不公开整 Session 删除入口。完整 Session `DeleteReceipt` 只能由删除协调器组装，并通过只删除已验证文件的窄端口驱动文件 provider，避免绕过 durable intent 或产生两份互相矛盾的收据。
-保留期扫描选择 `pinned = false`、`expiresAt <= cutoff` 的 active Session；若同一 Session 已有 `failed/in_progress` durable receipt 且处于 deleting，也必须在下一轮续跑同一 receipt。单项失败进入版本化报告而不阻断后续 Session。
+保留期扫描只对 active Session 应用 `pinned = false`、`expiresAt <= cutoff`。一旦 Session 已进入 deleting 且存在 `failed/in_progress` durable receipt，删除意图已经成为权威事实，后续扫描必须忽略新的 pin/expiry 值并续跑同一 receipt，不能留下半删除 Session。单项或协调器级失败进入版本化报告而不阻断后续 Session。
 pin 必须把 `expiresAt` 清为 null；unpin 必须由调用方按当前保留策略与注入 Clock 提供新的 `expiresAt`，不得恢复已经过期的旧值或在 repository 内硬编码 30 天。
 
 ## 6. 功能需求
@@ -222,19 +224,20 @@ pin 必须把 `expiresAt` 清为 null；unpin 必须由调用方按当前保留�
 - `STORE-FR-010`：C03/C04/C08/C11 定义的批准、预算、工具 execution journal 和模型 call journal 端口由 SQLite adapter 实现；同一工具开始边界中的批准消费、预算预留、operation 状态和 `tool.started`，以及同一模型开始边界中的预算预留与 `model.started`，必须分别在一个 SQLite 事务提交。
 - `STORE-FR-011`：数据库 migration、事件、Session、Artifact 元数据、删除收据和下游 journal 记录分别带主版本；恢复报告必须区分可迁移、只读兼容和阻塞三种结果。
 
-当前 `StorageRecoveryInspector` 已从 canonical events 报告 lifecycle、持久水位、最后连续稳定 sequence、首个缺口、Artifact 缺失/损坏/未 ready 以及删除 receipt。C08/C11 durable journal 尚未实现前，外部 operation 能力必须明确返回 `unavailable` 与原因，不能从事件文字猜测真实外部状态。
+当前 `StorageRecoveryInspector` 已从 canonical events 报告 lifecycle、持久水位、最后连续稳定 sequence、首个缺口、Artifact 缺失/损坏/未 ready、删除 receipt 的 item/协调器级错误，以及全局 `purge_state = pending` 墓碑。receipt 查询必须要求存在 `target = session`，与删除协调器使用同一身份规则；`deletion_reference_lost` 必须作为结构化恢复错误显式返回。C08/C11 durable journal 尚未实现前，外部 operation 能力必须明确返回 `unavailable` 与原因，不能从事件文字猜测真实外部状态。
 
 ## 7. 一致性与崩溃恢复
 
 - SQLite 使用 WAL、foreign keys 和 busy timeout。
 - `src/storage/sqlite/migrations.ts` 是唯一运行时 schema 来源；`schema_migrations` 记录版本、名称与 checksum，历史 checksum 漂移、版本缺口、数据库新于应用或 `user_version` 不一致均 fail closed。旧 `schema.sql` 只保留为 D1 历史快照，不参与启动。
-- Artifact 采用 `temporary -> staged -> ready` 协议：先在目标目录写随机临时文件、flush/关闭并计算 hash；随后登记 `staged` 元数据；原子重命名成功并再次验证 hash 后，以 `state = staged` 且 Session 仍 active 的 CAS 标记 `ready`。CAS 失败不得返回引用，恢复程序也不得复活 deleting Artifact。事件和工具结果只能引用 `ready` Artifact。
+- Artifact 采用 `temporary -> staged -> ready` 协议：先在目标目录写随机临时文件、flush/关闭并计算 hash；随后登记 `staged` 元数据；原子重命名成功并再次验证 hash 后，以 `state = staged` 且 Session 仍 active 的 CAS 标记 `ready`。CAS 失败不得返回引用，恢复程序也不得复活 deleting Artifact。恢复和普通读取必须复用同一 no-follow 路径解析，不能让 symlink 目标保持 ready。事件和工具结果只能引用 `ready` Artifact。
+- Artifact root 只允许由写入/恢复路径首次绑定；绑定后的普通 `read/inspect` 只执行指纹读查询，不申请 SQLite 写锁。普通 `read` 验证本次返回字节但不更新 `verifiedAt`；显式 `verify` 才持久化验证水位。
 - 崩溃后临时文件无记录：按 TTL 清理；`staged` 记录和临时文件都存在：继续原子重命名；最终文件存在但仍为 `staged`：验证后标记 `ready`；`ready` 记录对应文件缺失或 hash 不符：标记损坏，不能伪造工具成功。
 - 文件存在但数据库记录缺失：作为 orphan，延迟清理，不自动纳入 Session；不得仅凭文件名恢复归属。
 - 外部写事件处于 `unknown`：恢复只加载事实，由 C09 Provider 查询真实状态。
 - 删除开始时先持久化 receipt，再逐项删除；同一 Session 只能有一个进行中 work record，并发调用复用同一 receipt。中断后只按 receipt 继续传播，直到业务记录和文件都不存在。完成后销毁含原始 locator 的 work record，只保留 C14 定义的不可逆最小审计墓碑。
 - Artifact 文件删除器必须由同一个 `SqliteStorageDatabase` 和安装时绑定的权威 Artifact root 构造。元数据删除前必须清除该 Session 目录内全部 provider-owned ready/staged 文件并删除含原始 Session ID 的空目录；发现未知目录项时 fail closed，保留目录和收据供人工检查。
-- 数据库元数据删除提交后，墓碑先进入 `purge_state = pending`。只有 `secure_delete` 已启用且 `wal_checkpoint(TRUNCATE)` 成功清空当前 WAL 后，才能把墓碑推进为 `complete` 并向调用方报告完成。活跃 reader 阻塞 checkpoint 时返回可重试的 `physical_purge_pending`；数据库重启和 retention 扫描都必须先续跑全部 pending purge，且不得重新执行已完成的文件删除。
+- 数据库元数据删除提交后，墓碑先进入 `purge_state = pending`。只有 `secure_delete` 已启用且 `wal_checkpoint(TRUNCATE)` 成功清空当前 WAL 后，才能把墓碑推进为 `complete` 并向调用方报告完成。活跃 reader 阻塞 checkpoint 时删除调用返回可重试的 `physical_purge_pending`，但数据库仍允许以可检查状态打开；显式删除重试、retention 和恢复入口继续清理 pending purge，且不得重新执行已完成的文件删除。损坏或非临时 purge 错误仍阻止打开。
 
 ### 7.1 故障切点
 
@@ -288,3 +291,10 @@ MVP 的 data dir 是应用独占的本机目录：安装/启动必须用 ACL 阻
 4. 实现 FileArtifactStore 的原子写、hash 和边界检查。
 5. 实现恢复摘要、retention 和删除传播。
 6. 做崩溃、锁、磁盘与 orphan 故障注入。
+
+## 12. 已登记的后续优化
+
+- Session 列表当前为正确性优先，会对候选 Session 重放事件；大规模数据下的 lifecycle 版本化投影和 SQL 分页下推在独立性能 PR 中实现。
+- prepared statement cache、`SQLITE_CONSTRAINT_*` 扩展码细分和 task/deleting 查询语义需要统一 repository 策略后再落地。
+- Windows `EBUSY/EPERM` 的稳定重试策略依赖文件锁预算与取消策略；原生 handle-relative provider 一并解决强对抗路径和文件占用语义。
+- `corrupt` Artifact 的 `.bin` 仍受 Session retention/删除传播管理；若产品需要提前销毁，必须新增可审计 quarantine/GC receipt，不能由 orphan 扫描静默删除关联文件。

@@ -259,8 +259,10 @@ export class SessionDeletionService implements SessionDeletionCoordinator, Delet
       const snapshot = this.#snapshot(sessionId);
       this.#database
         .prepare(`
-INSERT INTO delete_receipts(receipt_id, schema_version, session_id, status, started_at, completed_at)
-VALUES (?, ?, ?, 'in_progress', ?, NULL)`)
+INSERT INTO delete_receipts(
+  receipt_id, schema_version, session_id, status, started_at, completed_at, error_json
+)
+VALUES (?, ?, ?, 'in_progress', ?, NULL, NULL)`)
         .run(receiptId, STORAGE_RECORD_SCHEMA_VERSION, sessionId, this.#storage.clock.utcNow());
       this.#insertMissingItems(receiptId, snapshot);
       this.#markRecordsDeleting(sessionId);
@@ -295,7 +297,7 @@ VALUES (?, ?, ?, 'in_progress', ?, NULL)`)
       }
       this.#database
         .prepare(`
-UPDATE delete_receipts SET status = 'in_progress', completed_at = NULL
+UPDATE delete_receipts SET status = 'in_progress', completed_at = NULL, error_json = NULL
 WHERE receipt_id = ? AND status <> 'complete'`)
         .run(receiptId);
       this.#insertMissingItems(receiptId, this.#snapshot(sessionId));
@@ -465,6 +467,7 @@ WHERE receipt_id = ? AND target IN ('event', 'approval', 'usage', 'artifact_meta
         status: "complete",
         startedAt: utcTimestampSchema.parse(receiptRow.started_at),
         completedAt,
+        error: null,
         items,
       };
       const targetCounts = countTargets(items, snapshot.taskCount);
@@ -689,6 +692,7 @@ FROM deleted_session_tombstones WHERE session_id_hash = ?`)
         status: "complete",
         startedAt: utcTimestampSchema.parse(row.requested_at),
         completedAt: utcTimestampSchema.parse(row.completed_at),
+        error: null,
         items: [],
       },
       purgeState: row.purge_state,
@@ -833,9 +837,13 @@ WHERE receipt_id = ? AND status = 'pending' ORDER BY ordinal LIMIT 1`)
       }
       this.#database
         .prepare(`
-UPDATE delete_receipts SET status = 'failed', completed_at = ?
+UPDATE delete_receipts SET status = 'failed', completed_at = ?, error_json = ?
 WHERE receipt_id = ? AND status <> 'complete'`)
-        .run(this.#storage.clock.utcNow(), receiptId);
+        .run(
+          this.#storage.clock.utcNow(),
+          error === null ? null : canonicalJson(error),
+          receiptId,
+        );
       this.#database.exec("COMMIT");
     } catch (markError: unknown) {
       if (this.#database.isTransaction) this.#database.exec("ROLLBACK");
@@ -846,7 +854,7 @@ WHERE receipt_id = ? AND status <> 'complete'`)
   #loadReceipt(receiptId: StableId): DeleteReceipt {
     const row = this.#database
       .prepare(`
-SELECT receipt_id, session_id, status, started_at, completed_at
+SELECT receipt_id, session_id, status, started_at, completed_at, error_json
 FROM delete_receipts WHERE receipt_id = ?`)
       .get(receiptId);
     if (!row) {
@@ -863,6 +871,7 @@ FROM delete_receipts WHERE receipt_id = ?`)
       status: readReceiptStatus(row.status),
       startedAt: utcTimestampSchema.parse(row.started_at),
       completedAt: row.completed_at === null ? null : utcTimestampSchema.parse(row.completed_at),
+      error: parseStoredError(row.error_json),
       items: this.#loadItems(receiptId),
     };
   }

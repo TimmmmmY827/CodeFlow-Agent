@@ -138,7 +138,7 @@ export class FileArtifactStore implements ArtifactStore, ArtifactRecoveryVerifie
       );
     }
 
-    await this.#ensureRoot();
+    await this.#ensureRoot(true);
     this.#assertSessionAcceptsArtifacts(checkedSessionId);
     const artifactId = createStableId();
     const sessionDirectory = await this.#ensureSessionDirectory(checkedSessionId);
@@ -242,7 +242,7 @@ FROM sessions WHERE session_id = ? AND deletion_state = 'active'`)
   async read(sessionId: string, reference: ArtifactReference): Promise<Uint8Array> {
     const checkedSessionId = stableIdSchema.parse(sessionId);
     const checkedReference = parseArtifactReference(reference);
-    await this.#ensureRoot();
+    await this.#ensureRoot(false);
     await this.#assertLexicallyInsideDataDirectory(checkedReference.relativePath);
     const record = this.#getArtifact(checkedReference.artifactId, checkedSessionId);
     this.#assertReferenceMatches(record, checkedReference);
@@ -292,15 +292,13 @@ FROM sessions WHERE session_id = ? AND deletion_state = 'active'`)
         "Keep the Artifact blocked and regenerate it from its trusted source.",
       );
     }
-    await this.#beforeStateTransition("verified", record.artifactId, record.sessionId);
-    this.#touchVerified(record.artifactId, record.sessionId);
     return bytes;
   }
 
   async verify(sessionId: string, reference: ArtifactReference): Promise<boolean> {
     const checkedSessionId = stableIdSchema.parse(sessionId);
     const checkedReference = parseArtifactReference(reference);
-    await this.#ensureRoot();
+    await this.#ensureRoot(false);
     await this.#assertLexicallyInsideDataDirectory(checkedReference.relativePath);
     const record = this.#getArtifact(checkedReference.artifactId, checkedSessionId);
     this.#assertReferenceMatches(record, checkedReference);
@@ -345,7 +343,7 @@ FROM sessions WHERE session_id = ? AND deletion_state = 'active'`)
   ): Promise<ArtifactPhysicalState> {
     const checkedSessionId = stableIdSchema.parse(sessionId);
     const checkedReference = parseArtifactReference(reference);
-    await this.#ensureRoot();
+    await this.#ensureRoot(false);
     const record = this.#getArtifact(checkedReference.artifactId, checkedSessionId);
     this.#assertReferenceMatches(record, checkedReference);
     if (record.state !== "ready") return "corrupt";
@@ -360,7 +358,7 @@ FROM sessions WHERE session_id = ? AND deletion_state = 'active'`)
 
   /** Reconciles interrupted Artifact commits and removes expired untracked files. */
   async recover(): Promise<ArtifactRecoveryReport> {
-    await this.#ensureRoot();
+    await this.#ensureRoot(true);
     let resumed = 0;
     let ready = 0;
     let corrupt = 0;
@@ -427,7 +425,11 @@ FROM sessions WHERE session_id = ? AND deletion_state = 'active'`)
         const stagedPath = await this.#resolveExisting(record.stagedRelativePath, record.artifactId);
         await rename(stagedPath, readyPath);
       }
-      if (!(await fileMatches(readyPath, record.byteLength, record.sha256))) {
+      const checkedReadyPath = await this.#resolveExisting(
+        record.readyRelativePath,
+        record.artifactId,
+      );
+      if (!(await fileMatches(checkedReadyPath, record.byteLength, record.sha256))) {
         await this.#beforeStateTransition("corrupt", record.artifactId, record.sessionId);
         this.#markCorrupt(
           record.artifactId,
@@ -506,7 +508,7 @@ FROM sessions WHERE session_id = ? AND deletion_state = 'active'`)
     return { deleted, preserved };
   }
 
-  async #ensureRoot(): Promise<void> {
+  async #ensureRoot(allowBinding: boolean): Promise<void> {
     if (this.#realDataDirectory === null) {
       this.#realDataDirectory = await realpath(this.#dataDirectory);
     }
@@ -536,11 +538,41 @@ FROM sessions WHERE session_id = ? AND deletion_state = 'active'`)
       throw outsideDataDirectoryError(artifactsDirectory);
     }
     this.#realArtifactsDirectory = actualArtifactsDirectory;
-    this.#bindArtifactRoot(actualArtifactsDirectory);
+    this.#bindArtifactRoot(actualArtifactsDirectory, allowBinding);
   }
 
-  #bindArtifactRoot(realRoot: string): void {
+  #bindArtifactRoot(realRoot: string, allowBinding: boolean): void {
     const fingerprint = digest(path.normalize(realRoot).toLowerCase());
+    const observed = this.#database.database
+      .prepare("SELECT artifact_root_fingerprint FROM storage_installation WHERE singleton = 1")
+      .get();
+    if (!observed) {
+      throw artifactError(
+        "storage_installation_corrupt",
+        "Storage installation metadata is missing.",
+        false,
+        "Stop writes and repair or recreate the storage installation metadata.",
+      );
+    }
+    if (observed.artifact_root_fingerprint !== null) {
+      if (observed.artifact_root_fingerprint !== fingerprint) {
+        throw artifactError(
+          "artifact_root_mismatch",
+          "Configured Artifact root does not match this storage installation.",
+          false,
+          "Use the Artifact data directory originally bound to this database.",
+        );
+      }
+      return;
+    }
+    if (!allowBinding) {
+      throw artifactError(
+        "artifact_root_unbound",
+        "Artifact root has not been bound by a write or recovery operation.",
+        false,
+        "Bind the authoritative Artifact root before serving read-only operations.",
+      );
+    }
     try {
       this.#database.database.exec("BEGIN IMMEDIATE");
       const row = this.#database.database

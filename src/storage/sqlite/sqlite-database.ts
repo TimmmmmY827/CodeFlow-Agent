@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { systemClock, type Clock } from "../../shared/contracts.js";
 import { migrateStorage } from "./migrations.js";
-import { storageError, translateStorageError } from "./sqlite-errors.js";
+import { StorageError, storageError, translateStorageError } from "./sqlite-errors.js";
 
 export { StorageError, storageError, translateStorageError } from "./sqlite-errors.js";
 
@@ -42,7 +42,14 @@ export class SqliteStorageDatabase implements Disposable {
       this.database.exec("PRAGMA synchronous = FULL");
       this.database.exec("PRAGMA secure_delete = ON");
       migrateStorage(this.database, this.clock);
-      this.completePendingPhysicalPurges();
+      try {
+        this.completePendingPhysicalPurges();
+      } catch (error: unknown) {
+        // A reader in another process can temporarily prevent WAL truncation.
+        // Keep the database usable for inspection/recovery while the durable
+        // pending tombstone remains the source of truth for the next retry.
+        if (!isPhysicalPurgePending(error)) throw error;
+      }
       if (typeof this.database.enableDefensive === "function") {
         this.database.enableDefensive(true);
       }
@@ -158,4 +165,8 @@ function parseWalCheckpoint(
 
 function isNonnegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPhysicalPurgePending(error: unknown): boolean {
+  return error instanceof StorageError && error.details.category === "physical_purge_pending";
 }

@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -54,6 +55,25 @@ describe("FileArtifactStore", () => {
     const reopened = openDatabase(fixture.databasePath);
     const reopenedStore = new FileArtifactStore(reopened, fixture.dataDirectory);
     await expect(reopenedStore.read(fixture.sessionId, reference)).resolves.toEqual(content);
+  });
+
+  it("reads a bound Artifact while another connection holds the SQLite write lock", async () => {
+    const fixture = await storageFixture();
+    const content = new TextEncoder().encode("read without a database write lock");
+    const writerStore = new FileArtifactStore(fixture.database, fixture.dataDirectory);
+    const reference = await writerStore.write(
+      fixture.sessionId,
+      "text/plain",
+      content,
+      "normal",
+    );
+    using writer = new DatabaseSync(fixture.databasePath, { timeout: 1 });
+    writer.exec("BEGIN IMMEDIATE");
+
+    const readerStore = new FileArtifactStore(fixture.database, fixture.dataDirectory);
+    await expect(readerStore.read(fixture.sessionId, reference)).resolves.toEqual(content);
+
+    writer.exec("ROLLBACK");
   });
 
   it("marks a tampered ready Artifact corrupt and refuses to read it", async () => {
@@ -190,6 +210,38 @@ describe("FileArtifactStore", () => {
     const reference = referenceFromRow(reopened, row.artifactId);
     await expect(recoveredStore.read(fixture.sessionId, reference)).resolves.toEqual(content);
     await expect(recoveredStore.recover()).resolves.toMatchObject({ resumed: 0, corrupt: 0 });
+  });
+
+  it("rejects a staged recovery whose ready path is a symbolic link", async () => {
+    const fixture = await storageFixture();
+    const store = new FileArtifactStore(fixture.database, fixture.dataDirectory, {
+      faultInjector: oneShotFault("artifact_after_staged"),
+    });
+    await expect(store.write(
+      fixture.sessionId,
+      "text/plain",
+      new TextEncoder().encode("staged bytes"),
+      "normal",
+    )).rejects.toMatchObject({ details: { category: "storage_operation_failed" } });
+    const row = fixture.database.database.prepare(`
+SELECT artifact_id, staged_relative_path, ready_relative_path FROM artifacts`).get();
+    if (!row || typeof row.artifact_id !== "string" ||
+        typeof row.staged_relative_path !== "string" ||
+        typeof row.ready_relative_path !== "string") {
+      throw new Error("Expected one staged Artifact row.");
+    }
+    const stagedPath = path.join(fixture.dataDirectory, ...row.staged_relative_path.split("/"));
+    const readyPath = path.join(fixture.dataDirectory, ...row.ready_relative_path.split("/"));
+    try {
+      await symlink(stagedPath, readyPath, "file");
+    } catch (error: unknown) {
+      if (isUnsupportedLink(error)) return;
+      throw error;
+    }
+
+    await expect(new FileArtifactStore(fixture.database, fixture.dataDirectory).recover())
+      .rejects.toMatchObject({ details: { category: "artifact_path_outside_data_dir" } });
+    expect(artifactState(fixture.database, row.artifact_id)).toBe("staged");
   });
 
   it("leaves a pre-staging interruption unreferenced and removes it as an orphan", async () => {
@@ -402,4 +454,10 @@ async function trackedTempDirectory(prefix: string): Promise<string> {
   const directory = await mkdtemp(path.join(tmpdir(), prefix));
   cleanupDirectories.push(directory);
   return directory;
+}
+
+function isUnsupportedLink(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) return false;
+  const code = (error as { readonly code?: unknown }).code;
+  return code === "EPERM" || code === "EACCES" || code === "ENOTSUP";
 }
