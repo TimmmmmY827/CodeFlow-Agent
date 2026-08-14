@@ -1,4 +1,4 @@
-import type { StructuredError, StableId } from "../shared/contracts.js";
+import { stableIdSchema, type StructuredError, type StableId } from "../shared/contracts.js";
 import { canonicalJson } from "../shared/json.js";
 import { parseAgentEvent, type AgentEvent } from "./agent-event.js";
 
@@ -71,29 +71,74 @@ export class InMemoryEventStore implements EventStore, EventSubscriber {
   }
 
   async list(sessionId: StableId, afterSequence?: number): Promise<readonly AgentEvent[]> {
-    const events = this.#events.get(sessionId) ?? [];
+    const checkedSessionId = validateEventSessionId(sessionId);
+    validateEventCursor(afterSequence);
+    const events = this.#events.get(checkedSessionId) ?? [];
     return events
       .filter((event) => afterSequence === undefined || event.sequence > afterSequence)
       .map((event) => cloneEvent(event));
   }
 
   async latestSequence(sessionId: StableId): Promise<number | null> {
-    return this.#events.get(sessionId)?.at(-1)?.sequence ?? null;
+    const checkedSessionId = validateEventSessionId(sessionId);
+    return this.#events.get(checkedSessionId)?.at(-1)?.sequence ?? null;
   }
 
   subscribe(sessionId: StableId, listener: EventListener): () => void {
-    const listeners = this.#listeners.get(sessionId) ?? new Set<EventListener>();
+    const checkedSessionId = validateEventSessionId(sessionId);
+    validateEventListener(listener);
+    const listeners = this.#listeners.get(checkedSessionId) ?? new Set<EventListener>();
     listeners.add(listener);
-    this.#listeners.set(sessionId, listeners);
+    this.#listeners.set(checkedSessionId, listeners);
     return () => {
       listeners.delete(listener);
-      if (listeners.size === 0) this.#listeners.delete(sessionId);
+      if (listeners.size === 0) this.#listeners.delete(checkedSessionId);
     };
   }
 
   async #notify(sessionId: StableId, event: AgentEvent): Promise<void> {
     const listeners = [...(this.#listeners.get(sessionId) ?? [])];
-    await Promise.allSettled(listeners.map((listener) => listener(cloneEvent(event))));
+    await Promise.allSettled(
+      listeners.map(async (listener) => listener(cloneEvent(event))),
+    );
+  }
+}
+
+export function validateEventSessionId(sessionId: StableId): StableId {
+  const parsed = stableIdSchema.safeParse(sessionId);
+  if (!parsed.success) {
+    throw new EventStoreError(
+      inputError(
+        "invalid_session_id",
+        "sessionId must be a UUID stable ID.",
+        "Use the persisted Session ID when reading or subscribing to events.",
+      ),
+    );
+  }
+  return parsed.data;
+}
+
+export function validateEventCursor(afterSequence: number | undefined): void {
+  if (afterSequence !== undefined && (!Number.isSafeInteger(afterSequence) || afterSequence < -1)) {
+    throw new EventStoreError(
+      inputError(
+        "event_cursor_invalid",
+        "afterSequence must be a safe integer greater than or equal to -1.",
+        "Restart incremental reading with a valid persisted sequence.",
+      ),
+    );
+  }
+}
+
+export function validateEventListener(listener: EventListener): void {
+  if (typeof listener !== "function") {
+    throw new EventStoreError(
+      inputError(
+        "invalid_event_listener",
+        "Event listener must be a function.",
+        "Pass a callable listener before subscribing.",
+      ),
+    );
   }
 }
 
@@ -106,6 +151,16 @@ function storeError(
   message: string,
   recovery: string,
 ): StructuredError {
+  return {
+    category,
+    message,
+    retryable: false,
+    sideEffectStatus: "none",
+    recovery,
+  };
+}
+
+function inputError(category: string, message: string, recovery: string): StructuredError {
   return {
     category,
     message,

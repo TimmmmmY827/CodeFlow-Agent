@@ -1,3 +1,10 @@
+-- DO NOT EXECUTE: unsupported historical D1 schema fixture retained only for
+-- architecture archaeology. It is neither an initializer nor a migration.
+-- Runtime schema is owned exclusively by the immutable, checksummed migrations
+-- in src/storage/sqlite/migrations.ts. A database created from this snapshot
+-- must be exported with a compatible historical build and re-imported into a
+-- fresh C02 database; current startup deliberately fails closed.
+
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
 

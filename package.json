@@ -8,8 +8,7 @@
     "codeflow": "./dist/cli/index.js"
   },
   "files": [
-    "dist",
-    "src/storage/schema.sql"
+    "dist"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -21,7 +20,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "packageManager": "pnpm@11.20.0",
   "dependencies": {
