@@ -31,12 +31,15 @@ describe("exportSanitizedTrace", () => {
         payload: {
           summary: "Read two files",
           apiKey: "do-not-export",
+          approvalToken: "do-not-export-token",
+          authorization: { scheme: "Bearer", value: "do-not-export-authorization" },
           nested: { reasoning: "do-not-export-either" },
         },
       }),
     ]);
 
     expect(output).toContain("Read two files");
+    expect(output).toContain('"inputTokens": 20');
     expect(output).not.toContain("do-not-export");
     expect(output).toContain("auth-secret-reference");
     expect(output).toContain("[REDACTED]");

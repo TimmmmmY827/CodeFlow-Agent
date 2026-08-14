@@ -4,6 +4,11 @@ import { ContextAssembler } from "../context/context-assembler.js";
 import { InMemoryEventStore } from "../events/event-store.js";
 import { BudgetController } from "../policy/budget-controller.js";
 import { PermissionEngine } from "../policy/permission-engine.js";
+import {
+  createCancellationContext,
+  type CancellationContext,
+  type UtcTimestamp,
+} from "../shared/contracts.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
 import { ToolRuntime } from "../tools/tool-runtime.js";
 
@@ -21,6 +26,10 @@ export interface CodeFlowApplication {
   readonly permissionEngine: PermissionEngine;
   readonly budgetController: BudgetController;
   readonly completionGate: CompletionGate;
+  cancellationContext(
+    signal: AbortSignal,
+    deadlineAt?: UtcTimestamp | null,
+  ): CancellationContext;
   describe(): ApplicationDescription;
 }
 
@@ -42,6 +51,8 @@ export function createApplication(): CodeFlowApplication {
       maxCostUsd: 1,
     }),
     completionGate: new CompletionGate(),
+    cancellationContext: (signal, deadlineAt = null) =>
+      createCancellationContext(signal, deadlineAt),
     describe: () => ({
       name: "CodeFlow Agent",
       phase: "D1_SCAFFOLD",

@@ -23,4 +23,14 @@ describe("createOperationHash", () => {
     expect(left).toBe(reordered);
     expect(newer).not.toBe(left);
   });
+
+  it("rejects values that cannot cross the JSON boundary", () => {
+    expect(() =>
+      createOperationHash({
+        toolName: "publish",
+        input: { requestedAt: new Date("2026-08-09T00:00:00.000Z") },
+        codeVersion: "git:a",
+      }),
+    ).toThrow(/plain objects/);
+  });
 });

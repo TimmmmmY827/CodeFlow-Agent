@@ -1,5 +1,7 @@
 import OpenAI from "openai";
 
+import { elapsedMilliseconds, systemClock } from "../shared/contracts.js";
+import { validateJsonValue, type JsonObject } from "../shared/json.js";
 import type { ModelAdapter, ModelRequest, ModelResponse } from "./model-adapter.js";
 
 export interface DeepSeekResponsesOptions {
@@ -25,6 +27,7 @@ export class DeepSeekResponsesAdapter implements ModelAdapter {
   }
 
   async generate(request: ModelRequest): Promise<ModelResponse> {
+    const startedAt = systemClock.monotonicNowMs();
     const response = await this.#client.responses.create(
       {
         model: this.model,
@@ -40,8 +43,26 @@ export class DeepSeekResponsesAdapter implements ModelAdapter {
       usage: {
         inputTokens: response.usage?.input_tokens ?? 0,
         outputTokens: response.usage?.output_tokens ?? 0,
+        cachedTokens: response.usage?.input_tokens_details.cached_tokens ?? 0,
         totalTokens: response.usage?.total_tokens ?? 0,
+        costUsd: null,
+        durationMs: elapsedMilliseconds(startedAt, systemClock.monotonicNowMs()),
+        providerUsage: providerUsage(response.usage),
       },
     };
   }
+}
+
+function providerUsage(value: unknown): JsonObject {
+  const jsonCompatible = JSON.parse(JSON.stringify(value ?? {})) as unknown;
+  const validated = validateJsonValue(jsonCompatible);
+  if (
+    !validated.ok ||
+    validated.value === null ||
+    Array.isArray(validated.value) ||
+    typeof validated.value !== "object"
+  ) {
+    throw new TypeError("Provider usage was not a JSON object.");
+  }
+  return validated.value as JsonObject;
 }

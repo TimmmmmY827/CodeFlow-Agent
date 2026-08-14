@@ -46,6 +46,7 @@ codeflow eval
 ## 架构入口
 
 - [总体架构](docs/architecture.md)
+- [组件需求设计与依赖顺序](docs/components/README.md)
 - [项目目录与组件边界](docs/project-structure.md)
 - [两周路线图](docs/roadmap.md)
 - [ADR-0001：模块化单体](docs/decisions/0001-modular-monolith.md)

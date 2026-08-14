@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -33,7 +34,7 @@ describe("AgentEvent", () => {
     });
 
     expect(agentEventSchema.parse(event).context).toMatchObject({
-      workspacePath: "C:/workspace",
+      workspacePath: path.resolve("C:/workspace"),
       codeVersion: "git:abc123",
       operation: { name: "read_file", durationMs: 18 },
       sideEffectStatus: "none",

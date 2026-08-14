@@ -42,11 +42,13 @@ CREATE TABLE IF NOT EXISTS agent_events (
   parent_span_id TEXT,
   workspace_path TEXT NOT NULL,
   code_version TEXT,
+  diff_hash TEXT,
   config_version TEXT NOT NULL,
   operation_kind TEXT,
   operation_name TEXT,
   operation_status TEXT,
   duration_ms REAL,
+  provider_usage_json TEXT,
   input_tokens INTEGER,
   output_tokens INTEGER,
   cached_tokens INTEGER,
@@ -91,8 +93,9 @@ CREATE TABLE IF NOT EXISTS usage_entries (
   input_tokens INTEGER NOT NULL DEFAULT 0,
   output_tokens INTEGER NOT NULL DEFAULT 0,
   cached_tokens INTEGER NOT NULL DEFAULT 0,
-  cost_usd REAL NOT NULL DEFAULT 0,
+  cost_usd REAL,
   duration_ms INTEGER NOT NULL DEFAULT 0,
+  provider_usage_json TEXT NOT NULL DEFAULT '{}',
   occurred_at TEXT NOT NULL
 );
 

@@ -33,7 +33,11 @@ describe("reduceAgentEvents", () => {
         ...common,
         sequence: 2,
         type: "plan.updated",
-        payload: { steps: ["Reproduce", "Patch", "Verify"] },
+        payload: {
+          revision: 1,
+          reason: "Initial execution plan",
+          steps: ["Reproduce", "Patch", "Verify"],
+        },
       }),
       createAgentEvent({ ...common, sequence: 3, type: "verification.started" }),
       createAgentEvent({
@@ -66,13 +70,15 @@ describe("reduceAgentEvents", () => {
 
     const waiting = reduceAgentEvents([
       createAgentEvent({ ...common, sequence: 0, type: "session.created" }),
-      createAgentEvent({ ...common, sequence: 1, type: "user.input.requested" }),
+      createAgentEvent({ ...common, sequence: 1, type: "session.started" }),
+      createAgentEvent({ ...common, sequence: 2, type: "user.input.requested" }),
     ]);
     const claimed = reduceAgentEvents([
       createAgentEvent({ ...common, sequence: 0, type: "session.created" }),
-      createAgentEvent({ ...common, sequence: 1, type: "user.input.requested" }),
-      createAgentEvent({ ...common, sequence: 2, type: "user.input.received" }),
-      createAgentEvent({ ...common, sequence: 3, type: "completion.claimed" }),
+      createAgentEvent({ ...common, sequence: 1, type: "session.started" }),
+      createAgentEvent({ ...common, sequence: 2, type: "user.input.requested" }),
+      createAgentEvent({ ...common, sequence: 3, type: "user.input.received" }),
+      createAgentEvent({ ...common, sequence: 4, type: "completion.claimed" }),
     ]);
 
     expect(waiting?.status).toBe("WAITING_USER");

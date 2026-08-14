@@ -1,12 +1,11 @@
-export interface ModelUsage {
-  readonly inputTokens: number;
-  readonly outputTokens: number;
+import type { CancellationContext, UsageRecord } from "../shared/contracts.js";
+
+export interface ModelUsage extends UsageRecord {
   readonly totalTokens: number;
 }
 
-export interface ModelRequest {
+export interface ModelRequest extends CancellationContext {
   readonly input: string;
-  readonly signal?: AbortSignal;
 }
 
 export interface ModelResponse {

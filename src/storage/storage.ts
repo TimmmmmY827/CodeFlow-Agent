@@ -1,26 +1,20 @@
 import type { AgentEvent } from "../events/agent-event.js";
+import type { ArtifactReference, StableId } from "../shared/contracts.js";
 
-export interface ArtifactReference {
-  readonly artifactId: string;
-  readonly relativePath: string;
-  readonly mediaType: string;
-  readonly byteLength: number;
-  readonly sha256: string;
-  readonly sensitivity: "normal" | "sensitive";
-}
+export type { ArtifactReference } from "../shared/contracts.js";
 
 export interface SessionRepository {
   appendEvent(event: AgentEvent): Promise<void>;
-  listEvents(sessionId: string): Promise<readonly AgentEvent[]>;
-  deleteSession(sessionId: string): Promise<void>;
+  listEvents(sessionId: StableId): Promise<readonly AgentEvent[]>;
+  deleteSession(sessionId: StableId): Promise<void>;
 }
 
 export interface ArtifactStore {
   write(
-    sessionId: string,
+    sessionId: StableId,
     mediaType: string,
     content: Uint8Array,
     sensitivity: ArtifactReference["sensitivity"],
   ): Promise<ArtifactReference>;
-  deleteSessionArtifacts(sessionId: string): Promise<void>;
+  deleteSessionArtifacts(sessionId: StableId): Promise<void>;
 }

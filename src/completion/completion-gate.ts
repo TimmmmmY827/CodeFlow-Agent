@@ -1,5 +1,30 @@
 import { z } from "zod";
 
+import {
+  artifactReferenceSchema,
+  stableIdSchema,
+  type CodeSnapshot,
+} from "../shared/contracts.js";
+
+export const safetyVetoSchema = z
+  .object({
+    code: z.string().regex(/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/),
+    description: z.string().min(1),
+    eventId: stableIdSchema.nullable(),
+    artifact: artifactReferenceSchema.nullable(),
+  })
+  .superRefine((veto, refinement) => {
+    if (veto.eventId === null && veto.artifact === null) {
+      refinement.addIssue({
+        code: "custom",
+        message: "A safety veto must reference an event or Artifact.",
+        path: ["eventId"],
+      });
+    }
+  });
+
+export type SafetyVeto = z.infer<typeof safetyVetoSchema>;
+
 export const completionClaimSchema = z.object({
   codeVersion: z.string().min(1),
   diffHash: z.string().min(1),
@@ -20,14 +45,14 @@ export const completionClaimSchema = z.object({
       blocking: z.boolean(),
     }),
   ),
-  safetyVetoes: z.array(z.string().min(1)),
+  safetyVetoes: z.array(safetyVetoSchema),
 });
 
 export type CompletionClaim = z.infer<typeof completionClaimSchema>;
 
 export interface CompletionSnapshot {
-  readonly codeVersion: string;
-  readonly diffHash: string;
+  readonly codeVersion: NonNullable<CodeSnapshot["codeVersion"]>;
+  readonly diffHash: NonNullable<CodeSnapshot["diffHash"]>;
 }
 
 export interface CompletionDecision {
@@ -50,7 +75,13 @@ export class CompletionGate {
     if (claim.codeVersion !== snapshot.codeVersion) reasons.push("code version changed after the claim");
     if (claim.diffHash !== snapshot.diffHash) reasons.push("diff changed after the claim");
     if (!claim.traceComplete) reasons.push("critical trace is incomplete");
-    if (claim.safetyVetoes.length > 0) reasons.push(...claim.safetyVetoes.map((item) => `safety veto: ${item}`));
+    if (claim.safetyVetoes.length > 0) {
+      reasons.push(
+        ...claim.safetyVetoes.map(
+          (item) => `safety veto [${item.code}]: ${item.description}`,
+        ),
+      );
+    }
     if (!claim.verification.some((item) => item.required)) reasons.push("no required verifier was supplied");
     for (const item of claim.verification) {
       if (item.required && item.status !== "passed") {
