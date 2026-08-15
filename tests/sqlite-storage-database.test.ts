@@ -45,6 +45,11 @@ describe("SqliteStorageDatabase migrations", () => {
         name: "initial_storage",
         applied_at: FIXED_TIMESTAMP,
       },
+      {
+        version: 2,
+        name: "durable_approval_state",
+        applied_at: FIXED_TIMESTAMP,
+      },
     ]);
 
     first.close();
@@ -56,11 +61,74 @@ describe("SqliteStorageDatabase migrations", () => {
     });
 
     expect(reopened.database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual(
-      { count: 1 },
+      { count: 2 },
     );
     expect(reopened.database.prepare("SELECT applied_at FROM schema_migrations").get()).toEqual({
       applied_at: FIXED_TIMESTAMP,
     });
+  });
+
+  it("upgrades a recorded v1 approvals table without reviving legacy approvals", () => {
+    const referencePath = migratedDatabasePath();
+    using reference = new DatabaseSync(referencePath);
+    const v1 = reference
+      .prepare("SELECT name, checksum FROM schema_migrations WHERE version = 1")
+      .get();
+    if (typeof v1?.name !== "string" || typeof v1.checksum !== "string") {
+      throw new Error("Reference v1 migration metadata is invalid.");
+    }
+
+    const databasePath = temporaryDatabasePath();
+    using legacy = new DatabaseSync(databasePath);
+    legacy.exec(`
+CREATE TABLE schema_migrations(
+  version INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  checksum TEXT NOT NULL,
+  applied_at TEXT NOT NULL
+);
+CREATE TABLE workspaces(workspace_id TEXT PRIMARY KEY);
+CREATE TABLE sessions(session_id TEXT PRIMARY KEY);
+CREATE TABLE tasks(task_id TEXT PRIMARY KEY);
+CREATE TABLE approvals(
+  approval_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+  schema_version INTEGER NOT NULL,
+  tool_name TEXT NOT NULL,
+  operation_hash TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  decided_at TEXT NOT NULL
+);`);
+    legacy
+      .prepare("INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (1, ?, ?, ?)")
+      .run(v1.name, v1.checksum, FIXED_TIMESTAMP);
+    legacy.exec("PRAGMA user_version = 1");
+    legacy.prepare("INSERT INTO sessions(session_id) VALUES (?)")
+      .run("11111111-1111-4111-8111-111111111111");
+    legacy.prepare(`
+INSERT INTO approvals(
+  approval_id, session_id, schema_version, tool_name, operation_hash,
+  decision, expires_at, decided_at
+) VALUES (?, ?, 1, 'publish', 'legacy-hash', 'approved', ?, ?)`)
+      .run(
+        "44444444-4444-4444-8444-444444444444",
+        "11111111-1111-4111-8111-111111111111",
+        FIXED_TIMESTAMP,
+        FIXED_TIMESTAMP,
+      );
+
+    migrateStorage(legacy, clock);
+
+    expect(legacy.prepare("PRAGMA user_version").get()).toEqual({ user_version: 2 });
+    expect(legacy.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 2 });
+    expect(legacy.prepare("SELECT record_json, record_hash FROM approvals").get()).toEqual({
+      record_json: null,
+      record_hash: null,
+    });
+    expect(
+      legacy.prepare("SELECT name FROM pragma_table_info('approvals') WHERE name = 'consumed_at'").get(),
+    ).toEqual({ name: "consumed_at" });
   });
 
   it("fails closed when an applied migration checksum has drifted", () => {
@@ -86,17 +154,17 @@ describe("SqliteStorageDatabase migrations", () => {
       .prepare(
         "INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (?, ?, ?, ?)",
       )
-      .run(2, "future_storage", "sha256:future", FIXED_TIMESTAMP);
-    newer.exec("PRAGMA user_version = 2");
+      .run(3, "future_storage", "sha256:future", FIXED_TIMESTAMP);
+    newer.exec("PRAGMA user_version = 3");
     newer.close();
 
     expectOpeningToFail(databasePath, "newer than this application");
 
     using inspection = new DatabaseSync(databasePath);
     expect(inspection.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({
-      count: 2,
+      count: 3,
     });
-    expect(inspection.prepare("PRAGMA user_version").get()).toEqual({ user_version: 2 });
+    expect(inspection.prepare("PRAGMA user_version").get()).toEqual({ user_version: 3 });
   });
 
   it("fails closed when PRAGMA user_version disagrees with migration history", () => {
@@ -232,9 +300,9 @@ describe("SqliteStorageDatabase migrations", () => {
     // acquires the lock and observes version 1 rather than a stale empty list.
     expect(() => migrateStorage(second, clock)).not.toThrow();
     expect(second.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({
-      count: 1,
+      count: 2,
     });
-    expect(second.prepare("PRAGMA user_version").get()).toEqual({ user_version: 1 });
+    expect(second.prepare("PRAGMA user_version").get()).toEqual({ user_version: 2 });
   });
 
   it("fails a historical D1 schema with an explicit export-and-reinitialize recovery", () => {

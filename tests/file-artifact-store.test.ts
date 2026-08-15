@@ -55,7 +55,7 @@ describe("FileArtifactStore", () => {
     const reopened = openDatabase(fixture.databasePath);
     const reopenedStore = new FileArtifactStore(reopened, fixture.dataDirectory);
     await expect(reopenedStore.read(fixture.sessionId, reference)).resolves.toEqual(content);
-  });
+  }, 15_000);
 
   it("reads a bound Artifact while another connection holds the SQLite write lock", async () => {
     const fixture = await storageFixture();

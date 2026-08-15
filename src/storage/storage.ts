@@ -10,3 +10,4 @@ export * from "./sqlite/sqlite-database.js";
 export * from "./sqlite/sqlite-event-store.js";
 export * from "./sqlite/sqlite-session-repository.js";
 export * from "./sqlite/sqlite-task-repository.js";
+export * from "./sqlite/sqlite-approval-repository.js";

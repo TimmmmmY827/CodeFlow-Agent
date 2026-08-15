@@ -31,12 +31,12 @@
 
 ```text
 lookup -> validate input -> canonical operation hash -> cancellation check
- -> permission decision -> check/consume in-memory approval -> emit started
+ -> legacy permission adapter -> check/consume in-memory approval -> emit started
  -> execute -> JSON serialization boundary -> inline or ArtifactStore
  -> emit finished -> return envelope
 ```
 
-当前没有 budget reservation、per-tool timeout、outputSchema 或持久化 event/approval；observer/ArtifactStore 失败后的证据恢复也未完成。
+当前没有 budget reservation、per-tool timeout、outputSchema 或持久化 event；observer/ArtifactStore 失败后的证据恢复也未完成。C03 已提供完整 OperationBinding、持久审批 repository 和可组合的 SQLite 消费原语，但当前 Runtime 尚未接线，仍使用显式 legacy hash/permission 入口与进程内消费；该入口不得被新调用方采用。
 
 ### 3.2 目标流水线（规划中）
 

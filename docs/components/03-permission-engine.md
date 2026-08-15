@@ -1,8 +1,8 @@
 # C03 PermissionEngine 与批准契约
 
-- 状态：风险判断、operation hash 和未知风险默认拒绝已实现；一次性消费仍由 C08 进程内完成，持久化批准缺失
+- 状态：完整 OperationBinding、四级权限判断、任务授权校验、安全摘要和 SQLite 持久审批状态机已实现；C08 原子执行事务接线仍待该组件开发
 - 目标阶段：D1–D6
-- 代码位置：`src/policy/permission-engine.ts`、`operation-hash.ts`
+- 代码位置：`src/policy/permission-engine.ts`、`permission-contracts.ts`、`operation-hash.ts`、`approval-summary.ts`；SQLite provider 位于 `src/storage/sqlite/sqlite-approval-repository.ts`
 - 硬依赖：[C00 共享契约](00-shared-contracts.md)
 - 下游消费者：C08、C09、C11、C13、C14
 
@@ -22,7 +22,7 @@
 
 ### 明确不负责
 
-- 展示交互 UI、执行工具、保存审批或查询外部操作状态。
+- 展示交互 UI、执行工具或查询外部操作状态。C03 定义 approval repository 并提供 SQLite 状态机；C08 负责把消费加入执行事务。
 - 根据 LLM 自评降低风险等级。
 
 ## 3. 权限矩阵
@@ -64,11 +64,15 @@ interface ApprovalToken {
 operationHash = sha256(canonicalJson(operationBinding))
 ```
 
-`effectiveInputHash` 来自 C07 `inputSchema` 解析并执行版本化 normalization 后的最终参数，不是模型发送的原始 JSON。Session/Task/授权版本、工具版本、schema、normalization、workspace、代码/diff 和行为配置任一变化都使旧批准失效。只影响显示、不影响行为的 UI 配置不得进入 binding。
+`effectiveInputHash` 通过 `createEffectiveInputHash()` 对 C07 `inputSchema` 解析并执行版本化 normalization 后的最终参数计算，不是模型发送的原始 JSON。Session/Task/授权版本、工具版本、schema、normalization、workspace、代码/diff 和行为配置任一变化都使旧批准失效。只影响显示、不影响行为的 UI 配置不得进入 binding。
 
-当前可编译 `ApprovalToken` 仍含 toolName 且 hash 只覆盖 tool/input/codeVersion；上面的 `OperationBinding` 和精简 token 是目标契约。迁移必须先更新 operation-hash 契约测试，再审计 C07/C08/C09/C13。
+当前公共 `ApprovalToken` 已精简为上述三个字段，`createOperationHash` 只接受完整 `OperationBinding`。C08 当前基础 Runtime 暂时调用显式命名的 `createLegacyOperationHash` 与 `PermissionEngine.decide()` 兼容入口；新代码不得使用该不完整身份。待 C07 提供版本化工具/schema/normalization 元数据后，C08 必须改为构造完整 binding 并调用 `evaluate()`，随后删除 legacy 入口。
 
-Runtime 在工具开始执行前消费 token。消费后即使工具失败也不得自动复用；外部写失败进入 `UNKNOWN` 并先对账。
+`SqliteApprovalRepository` 持久化固定状态机，并提供只能在已有 SQLite 事务内调用的 `consumeWithinTransaction()`。C08 在工具开始执行前把它与预算、operation 和 `tool.started` 一起提交；消费后即使工具失败也不得自动复用，外部写失败进入 `UNKNOWN` 并先对账。
+
+Repository 的 `get()` 会在读取到已到期的 `issued/approved` 记录时以 `BEGIN IMMEDIATE` 惰性持久化为 `expired`，因此展示层不会把过期记录误呈现为可用。`consumeWithinTransaction()` 在读取审批前执行受控写以取得或升级 SQLite 写锁；C08 仍应在 commit fence 前以 `BEGIN IMMEDIATE` 开始执行事务，锁升级失败必须 fail closed。所有会改变审批状态的路径都会在同一写事务复查 Session 仍为 `active`。
+
+`invalidated` 严格保留为 `approved -> invalidated`，用于批准后 binding/snapshot 失效；尚未决策的 `issued` 请求若被用户或控制流取消，使用 `resolve(..., decision: "denied")` 留下明确拒绝事实。Session 删除则遵循 C14 隐私契约：删除原始 approval 行，只在最小删除墓碑中保留 approval target 数量，不把可恢复的审批摘要长期留存。
 
 PermissionEngine 必须注入 C00 `Clock`，不得直接读取 `Date.now()`。`Date.parse(expiresAt) <= Date.parse(clock.utcNow())` 视为已经过期，解析失败为 deny，过期为重新请求批准；测试使用虚拟时钟覆盖等于边界和时钟前后跳变。
 
@@ -95,7 +99,7 @@ sequenceDiagram
     participant U as CLI/HITL
     L->>R: tool + requested input + snapshot
     R->>R: parse + normalize -> OperationBinding
-    R->>P: decide(operationHash)
+    R->>P: evaluate(binding + authorization/approval evidence)
     P-->>R: confirm
     R-->>L: approval_required
     L->>U: approval.requested
@@ -103,7 +107,7 @@ sequenceDiagram
     L->>R: retry same operation
     R->>P: validate token
     P-->>R: allow
-    R->>R: consume token before side effect
+    R->>R: journal.begin transaction consumes approval
 ```
 
 ## 7. 错误与恢复
@@ -138,8 +142,8 @@ sequenceDiagram
 
 ## 10. 实现任务建议
 
-1. 把 task authorization 与 approval token 建成显式 schema。
-2. 增加审批 repository，持久化 issued/approved/denied/consumed。
-3. 将 Runtime 的进程内消费替换为事务性持久化消费。
-4. 提供 UI 安全摘要生成器。
-5. 接入 C11/C13 并完成崩溃与重放测试。
+1. [已完成] 把 task authorization、OperationBinding、approval token/record 建成严格 schema。
+2. [已完成] 增加审批 repository 与 SQLite v2 migration，持久化完整固定状态机。
+3. [C08] 将 Runtime 的 legacy 进程内消费替换为 execution journal 内的事务性持久化消费。
+4. [已完成] 提供不接收原始工具输入、拒绝 credential URL 的 UI 安全摘要生成器。
+5. [C11/C13] 接入等待/决策交互；C03 已覆盖持久消费、重启、过期与重放拒绝测试。

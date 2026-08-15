@@ -4,7 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type { Clock } from "../../shared/contracts.js";
 import { StorageError, translateStorageError } from "./sqlite-errors.js";
 
-export const STORAGE_SCHEMA_VERSION = 1;
+export const STORAGE_SCHEMA_VERSION = 2;
 
 export interface MigrationHooks {
   /** Test-only observation point reached after the migration write lock is held. */
@@ -157,6 +157,27 @@ VALUES (1, 1, NULL, NULL);
 CREATE INDEX idx_agent_events_session_sequence ON agent_events(session_id, sequence);
 CREATE INDEX idx_sessions_expiration ON sessions(pinned, expires_at);
 CREATE INDEX idx_artifacts_session_state ON artifacts(session_id, state);
+`,
+  },
+  {
+    version: 2,
+    name: "durable_approval_state",
+    sql: `
+ALTER TABLE approvals ADD COLUMN task_id TEXT REFERENCES tasks(task_id);
+ALTER TABLE approvals ADD COLUMN workspace_id TEXT REFERENCES workspaces(workspace_id);
+ALTER TABLE approvals ADD COLUMN issued_at TEXT CHECK (
+  issued_at IS NULL OR (length(issued_at) = 24 AND issued_at GLOB '????-??-??T??:??:??.???Z')
+);
+ALTER TABLE approvals ADD COLUMN consumed_at TEXT CHECK (
+  consumed_at IS NULL OR (length(consumed_at) = 24 AND consumed_at GLOB '????-??-??T??:??:??.???Z')
+);
+ALTER TABLE approvals ADD COLUMN record_hash TEXT CHECK (
+  record_hash IS NULL OR (length(record_hash) = 71 AND record_hash LIKE 'sha256:%')
+);
+ALTER TABLE approvals ADD COLUMN record_json TEXT;
+
+CREATE INDEX idx_approvals_session_state ON approvals(session_id, decision);
+CREATE INDEX idx_approvals_operation_hash ON approvals(operation_hash);
 `,
   },
 ];
