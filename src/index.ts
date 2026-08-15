@@ -56,7 +56,49 @@ export type {
 export { DeepSeekResponsesAdapter } from "./model/deepseek-responses-adapter.js";
 export { BudgetController } from "./policy/budget-controller.js";
 export { PermissionEngine } from "./policy/permission-engine.js";
-export { createOperationHash } from "./policy/operation-hash.js";
+export type {
+  LegacyApprovalToken,
+  LegacyPermissionContext,
+  PermissionContext,
+  PermissionDecision,
+  PermissionReasonCode,
+  PermissionSubject,
+} from "./policy/permission-engine.js";
+export {
+  ApprovalError,
+  approvalRecordSchema,
+  approvalResourceSchema,
+  approvalStateSchema,
+  approvalSummarySchema,
+  approvalTokenSchema,
+  operationBindingSchema,
+  OPERATION_BINDING_VERSION,
+  PERMISSION_SCHEMA_VERSION,
+  taskAuthorizationSchema,
+} from "./policy/permission-contracts.js";
+export type {
+  ApprovalRecord,
+  ApprovalRepository,
+  ApprovalResource,
+  ApprovalState,
+  ApprovalSummary,
+  ApprovalToken,
+  ConsumeApprovalInput,
+  IssueApprovalInput,
+  OperationBinding,
+  ResolveApprovalInput,
+  TaskAuthorization,
+} from "./policy/permission-contracts.js";
+export { createApprovalSummary } from "./policy/approval-summary.js";
+export {
+  createEffectiveInputHash,
+  createLegacyOperationHash,
+  createOperationHash,
+} from "./policy/operation-hash.js";
+export {
+  approvalFailure,
+  SqliteApprovalRepository,
+} from "./storage/sqlite/sqlite-approval-repository.js";
 export * from "./shared/index.js";
 export * from "./storage/storage.js";
 export { ToolRegistry } from "./tools/tool-registry.js";

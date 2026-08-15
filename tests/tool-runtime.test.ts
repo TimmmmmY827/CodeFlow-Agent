@@ -4,7 +4,7 @@ import { z } from "zod";
 import { describe, expect, it } from "vitest";
 
 import { PermissionEngine } from "../src/policy/permission-engine.js";
-import { createOperationHash } from "../src/policy/operation-hash.js";
+import { createLegacyOperationHash } from "../src/policy/operation-hash.js";
 import type { ArtifactWriter } from "../src/storage/storage.js";
 import { ToolRegistry } from "../src/tools/tool-registry.js";
 import { ToolRuntime, type ToolExecutionRequest } from "../src/tools/tool-runtime.js";
@@ -71,7 +71,7 @@ describe("ToolRuntime", () => {
     });
     const runtime = new ToolRuntime(registry, new PermissionEngine());
     const input = { remote: "origin", branch: "agent/demo" };
-    const operationHash = createOperationHash({
+    const operationHash = createLegacyOperationHash({
       toolName: "commit_push_create_pr",
       input,
       codeVersion: "git:abc123",
@@ -156,7 +156,7 @@ describe("ToolRuntime", () => {
     });
     const runtime = new ToolRuntime(registry, new PermissionEngine());
     const input = { branch: "agent/demo" };
-    const operationHash = createOperationHash({
+    const operationHash = createLegacyOperationHash({
       toolName: "commit_push_create_pr",
       input,
       codeVersion: "git:abc123",

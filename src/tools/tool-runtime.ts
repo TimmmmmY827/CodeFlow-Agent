@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 
-import type { PermissionEngine, ApprovalToken } from "../policy/permission-engine.js";
-import { createOperationHash } from "../policy/operation-hash.js";
+import type { LegacyApprovalToken, PermissionEngine } from "../policy/permission-engine.js";
+import { createLegacyOperationHash } from "../policy/operation-hash.js";
 import {
   cancellationFailure,
   elapsedMilliseconds,
@@ -48,7 +48,7 @@ export interface ToolExecutionRequest {
   readonly sessionId: StableId;
   readonly taskId: StableId;
   readonly taskWriteAuthorized: boolean;
-  readonly approvalToken: ApprovalToken | null;
+  readonly approvalToken: LegacyApprovalToken | null;
 }
 
 export interface ToolRuntimeEvent {
@@ -103,7 +103,7 @@ export class ToolRuntime {
 
     let operationHash: string;
     try {
-      operationHash = createOperationHash({
+      operationHash = createLegacyOperationHash({
         toolName: tool.name,
         input: parsed.data,
         codeVersion: request.codeVersion,
