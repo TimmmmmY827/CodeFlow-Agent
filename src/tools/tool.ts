@@ -3,6 +3,7 @@ import type { ZodType } from "zod";
 import type {
   CancellationContext,
   StableId,
+  StructuredError,
   ToolRetryPolicy,
   ToolRisk,
   ToolSideEffect,
@@ -27,6 +28,14 @@ export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   readonly retryPolicy: ToolRetryPolicy;
   readonly inputSchema: ZodType<TInput>;
   readonly execute: (input: TInput, context: ToolExecutionContext) => Promise<TOutput>;
+}
+
+/** A provider may reject an operation with a stable, user-actionable category. */
+export class ToolExecutionError extends Error {
+  constructor(readonly details: StructuredError) {
+    super(details.message);
+    this.name = "ToolExecutionError";
+  }
 }
 
 // ToolRegistry erases concrete input/output types only after ToolRuntime has validated the input schema.

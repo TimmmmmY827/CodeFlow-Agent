@@ -108,6 +108,7 @@ interface ActiveOperation {
   readonly key: string;
   readonly name: string;
   readonly kind: "model" | "tool";
+  readonly operationHash: string | null;
 }
 
 interface ReducerState {
@@ -408,12 +409,17 @@ function startOperation(
   if (!operation || operation.kind !== kind || operation.status !== "running") {
     throw invalidPayload(event.type, `${event.type} requires a running ${kind} operation context.`);
   }
-  const key = operationKey(event);
+  const key = spanOperationKey(event);
   if (state.activeOperations.has(key)) {
-    throw reducerError("event_operation_mismatch", `Operation ${operation.name} started more than once.`, "Use one started fact per operation hash or span.");
+    throw reducerError("event_operation_mismatch", `Operation ${operation.name} started more than once on the same span.`, "Use one started fact per operation span.");
   }
   const activeOperations = new Map(state.activeOperations);
-  activeOperations.set(key, { key, name: operation.name, kind });
+  activeOperations.set(key, {
+    key,
+    name: operation.name,
+    kind,
+    operationHash: eventOperationHash(event),
+  });
   return withView({ ...state, activeOperations }, { ...view, activeOperation: operation.name });
 }
 
@@ -427,7 +433,7 @@ function finishOperation(
   if (!operation || operation.kind !== kind || !["completed", "failed", "cancelled"].includes(operation.status)) {
     throw invalidPayload(event.type, `${event.type} requires a completed, failed or cancelled ${kind} operation context.`);
   }
-  const key = operationKey(event);
+  const key = matchingOperationKey(state, event, kind);
   const active = state.activeOperations.get(key);
   if (!active || active.kind !== kind || active.name !== operation.name) {
     throw reducerError("event_operation_mismatch", `No matching started ${kind} operation exists for ${operation.name}.`, "Bind started and finished facts to the same operation hash or span.");
@@ -445,7 +451,7 @@ function reconcileOperation(state: ReducerState, event: AgentEvent, view: Sessio
   }
   if (outcome === "unknown") return withView(state, { ...withError(view, event, "external_state_unknown"), status: "UNKNOWN" });
   const activeOperations = new Map(state.activeOperations);
-  activeOperations.delete(operationKey(event));
+  activeOperations.delete(matchingOperationKey(state, event, operationKind(event)));
   return withView({ ...state, activeOperations }, { ...view, status: "RUNNING", activeOperation: lastOperationName(activeOperations) });
 }
 
@@ -453,8 +459,13 @@ function markUnknownOperation(state: ReducerState, event: AgentEvent, view: Sess
   const operation = event.context.operation;
   const activeOperations = new Map(state.activeOperations);
   if (operation && (operation.kind === "model" || operation.kind === "tool")) {
-    const key = operationKey(event);
-    activeOperations.set(key, { key, name: operation.name, kind: operation.kind });
+    const key = matchingOperationKey(state, event, operation.kind);
+    activeOperations.set(key, {
+      key,
+      name: operation.name,
+      kind: operation.kind,
+      operationHash: eventOperationHash(event),
+    });
   }
   return withView(
     { ...state, activeOperations },
@@ -466,9 +477,56 @@ function markUnknownOperation(state: ReducerState, event: AgentEvent, view: Sess
   );
 }
 
-function operationKey(event: AgentEvent): string {
-  const operationHash = event.context.operation?.operationHash ?? readString(event.payload, "operationHash");
-  return operationHash ? `hash:${operationHash}` : `span:${event.spanId}`;
+function spanOperationKey(event: AgentEvent): string {
+  return `span:${event.spanId}`;
+}
+
+function eventOperationHash(event: AgentEvent): string | null {
+  return event.context.operation?.operationHash ?? readString(event.payload, "operationHash");
+}
+
+function operationKind(event: AgentEvent): "model" | "tool" {
+  const kind = event.context.operation?.kind;
+  if (kind !== "model" && kind !== "tool") {
+    throw invalidPayload(event.type, `${event.type} requires a model or tool operation context.`);
+  }
+  return kind;
+}
+
+function matchingOperationKey(
+  state: ReducerState,
+  event: AgentEvent,
+  kind: "model" | "tool",
+): string {
+  const spanKey = spanOperationKey(event);
+  const operation = event.context.operation;
+  const bySpan = state.activeOperations.get(spanKey);
+  if (bySpan && bySpan.kind === kind && bySpan.name === operation?.name) return spanKey;
+  if (bySpan) {
+    throw reducerError(
+      "event_operation_mismatch",
+      `Span ${event.spanId} is already bound to a different active operation.`,
+      "Bind each terminal fact to the exact started operation span.",
+    );
+  }
+
+  const operationHash = eventOperationHash(event);
+  if (operationHash) {
+    const legacyMatches = [...state.activeOperations.values()].filter((active) =>
+      active.kind === kind &&
+      active.name === operation?.name &&
+      active.operationHash === operationHash
+    );
+    if (legacyMatches.length === 1) return legacyMatches[0]?.key ?? spanKey;
+    if (legacyMatches.length > 1) {
+      throw reducerError(
+        "event_operation_mismatch",
+        `Operation ${operation?.name ?? "unknown"} has multiple active spans for the same operation hash.`,
+        "Bind the terminal fact to the exact started span.",
+      );
+    }
+  }
+  return spanKey;
 }
 
 function readPendingApproval(event: AgentEvent): PendingApproval {

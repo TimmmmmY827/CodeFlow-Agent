@@ -89,7 +89,7 @@ stateDiagram-v2
 
 C04 完成后，`budget.updated` 必须携带 `context.budgetSnapshot`，其 schema 直接复用 C04 版本化 `BudgetSnapshot`，覆盖 token、retry、no-progress、reservation 和 `costUsd: null`；reducer 只把该字段投影到 `SessionView.budget`。旧四维 `context.budget` 仅为同一 AgentEvent v1 的历史可选字段保留解析兼容，不再更新可见预算，也不能用于新 `budget.updated` 事实。
 
-模型/工具 started 与 completed/failed/cancelled 通过 `operationHash` 配对；未提供 hash 时回退到 span ID。`operation.unknown` 必须同时提供操作名称、外部身份和恢复建议，并进入 `UNKNOWN`；`operation.reconciled` 只有 `applied`/`not_applied` 才能回到 `RUNNING`，仍为 `unknown` 时继续阻断完成。
+模型/工具 started 与 completed/failed/cancelled 优先通过精确 span ID 配对；`operationHash` 是批准/版本/参数绑定指纹，不是一次调用的唯一身份。为兼容旧事实，terminal fact 的 span 无法命中时，只允许在 kind、name 与 operationHash 唯一匹配一个 active operation 时回退配对；同 hash 存在多个 active span 时必须 fail closed。`operation.unknown` 必须同时提供操作名称、外部身份和恢复建议，并进入 `UNKNOWN`；`operation.reconciled` 只有 `applied`/`not_applied` 才能回到 `RUNNING`，仍为 `unknown` 时继续阻断完成。
 
 ## 5. 完整性、错误与恢复
 
@@ -106,3 +106,4 @@ C04 完成后，`budget.updated` 必须携带 `context.budgetSnapshot`，其 sch
 - `EVENT-AC-005`：`checkTraceIntegrity` 契约断言首个缺失序号和结构化错误。
 
 本组件已通过 `pnpm typecheck`、`pnpm test`；交付前仍需执行仓库统一门禁 `pnpm check` 和 `pnpm start -- --help`。SQLite EventStore、ArtifactStore 和 UI 视图仍按 C02/C13 计划实现，不在 C01 中用空实现提前标记完成。
+Issue #7 增加 `ExecutionJournal` 持久化端口：C08/C11 通过同一 begin/finish 契约写入 operation lifecycle，但事件类型、状态转换和 reducer 权威仍由 C01 定义。实现必须在 durable acknowledgement 后才开始模型或工具调用；SQLite provider 使用 C02 同一 `BEGIN IMMEDIATE` 同步事务把 C04 reservation/settlement 与 started/completed fact 一并提交。

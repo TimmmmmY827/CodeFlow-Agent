@@ -1,10 +1,13 @@
 import { Buffer } from "node:buffer";
 
+import type { ExecutionJournal, ExecutionLease } from "../events/execution-journal.js";
+import { budgetDeltaSchema } from "../policy/budget-contracts.js";
 import type { LegacyApprovalToken, PermissionEngine } from "../policy/permission-engine.js";
 import { createLegacyOperationHash } from "../policy/operation-hash.js";
 import {
   cancellationFailure,
   elapsedMilliseconds,
+  structuredErrorSchema,
   systemClock,
   type SideEffectStatus,
   type StableId,
@@ -14,6 +17,7 @@ import {
 import { validateJsonValue, type JsonValue } from "../shared/json.js";
 import type { ArtifactReference, ArtifactWriter } from "../storage/storage.js";
 import type { ToolRegistry } from "./tool-registry.js";
+import { ToolExecutionError } from "./tool.js";
 
 export type ToolRuntimeStatus =
   | "completed"
@@ -47,6 +51,9 @@ export interface ToolExecutionRequest {
   readonly deadlineAt?: UtcTimestamp | null;
   readonly sessionId: StableId;
   readonly taskId: StableId;
+  readonly traceId?: StableId;
+  readonly parentTaskId?: StableId | null;
+  readonly actorId?: string;
   readonly taskWriteAuthorized: boolean;
   readonly approvalToken: LegacyApprovalToken | null;
 }
@@ -63,6 +70,7 @@ export interface ToolRuntimeOptions {
   readonly artifactStore?: ArtifactWriter;
   readonly maxInlineBytes?: number;
   readonly observe?: (event: ToolRuntimeEvent) => void | Promise<void>;
+  readonly journal?: ExecutionJournal;
 }
 
 export class ToolRuntime {
@@ -70,6 +78,7 @@ export class ToolRuntime {
   readonly #artifactStore: ArtifactWriter | null;
   readonly #maxInlineBytes: number;
   readonly #observe: ((event: ToolRuntimeEvent) => void | Promise<void>) | null;
+  readonly #journal: ExecutionJournal | null;
 
   constructor(
     private readonly registry: ToolRegistry,
@@ -79,6 +88,7 @@ export class ToolRuntime {
     this.#artifactStore = options.artifactStore ?? null;
     this.#maxInlineBytes = options.maxInlineBytes ?? 32_000;
     this.#observe = options.observe ?? null;
+    this.#journal = options.journal ?? null;
   }
 
   async execute(request: ToolExecutionRequest): Promise<ToolResultEnvelope> {
@@ -179,6 +189,60 @@ export class ToolRuntime {
       this.#consumedApprovalIds.add(request.approvalToken.approvalId);
     }
 
+    let journalLease: ExecutionLease | null = null;
+    if (this.#journal) {
+      if (!request.traceId) {
+        return failure(tool.name, operationHash, 0, "journal_context_missing", "Durable tool execution requires a traceId.", false);
+      }
+      try {
+        journalLease = await this.#journal.begin({
+          identity: {
+            sessionId: request.sessionId,
+            taskId: request.taskId,
+            traceId: request.traceId,
+            workspacePath: request.workspace,
+            codeVersion: request.codeVersion,
+            diffHash: request.diffHash ?? null,
+            configVersion: request.configVersion,
+            ...(request.parentTaskId === undefined ? {} : { parentTaskId: request.parentTaskId }),
+            ...(request.actorId === undefined ? {} : { actorId: request.actorId }),
+          },
+          kind: "tool",
+          name: tool.name,
+          operationHash,
+          estimate: budgetDeltaSchema.parse({ toolCalls: 1 }),
+          payload: { toolName: tool.name },
+        });
+      } catch (error: unknown) {
+        const details = errorDetails(error, "tool_journal_begin_failed", "The durable tool start could not be recorded.");
+        return envelope(tool.name, operationHash, "failed", 0, details.sideEffectStatus, null, null, details);
+      }
+    }
+
+    const cancellationAfterJournal = cancellationFailure({
+      signal: request.signal,
+      deadlineAt: request.deadlineAt ?? null,
+    });
+    if (cancellationAfterJournal) {
+      const sideEffectStatus = sideEffectBeforeExecution(tool.sideEffect);
+      const details = { ...cancellationAfterJournal, sideEffectStatus };
+      if (this.#journal && journalLease) {
+        try {
+          await this.#journal.finish({
+            lease: journalLease,
+            status: "cancelled",
+            actual: budgetDeltaSchema.parse({}),
+            sideEffectStatus,
+            error: details,
+            payload: { toolName: tool.name, status: "cancelled" },
+          });
+        } catch (error: unknown) {
+          return failure(tool.name, operationHash, 0, "tool_journal_finish_failed", error instanceof Error ? error.message : String(error), false);
+        }
+      }
+      return envelope(tool.name, operationHash, "cancelled", 0, sideEffectStatus, null, null, details);
+    }
+
     const startedAt = systemClock.monotonicNowMs();
     await this.#notify({
       phase: "started",
@@ -213,6 +277,18 @@ export class ToolRuntime {
       const durationMs = elapsedMilliseconds(startedAt, systemClock.monotonicNowMs());
       const cancelled = request.signal.aborted || isAbortError(error);
       const unknownSideEffect = tool.sideEffect !== "none";
+      if (error instanceof ToolExecutionError) {
+        result = envelope(
+          tool.name,
+          operationHash,
+          error.details.category === "cancelled" ? "cancelled" : "failed",
+          durationMs,
+          error.details.sideEffectStatus,
+          null,
+          null,
+          error.details,
+        );
+      } else {
       result = failure(
         tool.name,
         operationHash,
@@ -223,6 +299,7 @@ export class ToolRuntime {
         unknownSideEffect ? "unknown" : cancelled ? "cancelled" : "failed",
         unknownSideEffect ? "unknown" : "none",
       );
+      }
     }
 
     await this.#notify({
@@ -232,6 +309,36 @@ export class ToolRuntime {
       status: result.status,
       durationMs: result.durationMs,
     });
+
+    if (this.#journal && journalLease) {
+      try {
+        await this.#journal.finish({
+          lease: journalLease,
+          status: result.status === "completed" ? "completed" : result.status === "cancelled" ? "cancelled" : "failed",
+          actual: budgetDeltaSchema.parse({ toolCalls: 1, activeDurationMs: result.durationMs }),
+          sideEffectStatus: result.sideEffectStatus,
+          error: result.error,
+          payload: {
+            toolName: tool.name,
+            status: result.status,
+            artifactId: result.artifact?.artifactId ?? null,
+          },
+        });
+      } catch (error: unknown) {
+        const unknownSideEffect = tool.sideEffect !== "none" && result.sideEffectStatus !== "not_started";
+        return failure(
+          tool.name,
+          operationHash,
+          result.durationMs,
+          "tool_journal_finish_failed",
+          error instanceof Error ? error.message : String(error),
+          !unknownSideEffect,
+          unknownSideEffect ? "unknown" : "failed",
+          unknownSideEffect ? "unknown" : "none",
+          "Reconcile the durable execution journal before continuing the Session.",
+        );
+      }
+    }
     return result;
   }
 
@@ -294,7 +401,12 @@ export class ToolRuntime {
   }
 
   async #notify(event: ToolRuntimeEvent): Promise<void> {
-    await this.#observe?.(event);
+    try {
+      await this.#observe?.(event);
+    } catch {
+      // Observers are non-authoritative diagnostics and cannot wedge the
+      // durable execution state machine.
+    }
   }
 }
 
@@ -348,4 +460,19 @@ function sideEffectBeforeExecution(sideEffect: "none" | "workspace_write" | "ext
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
+}
+
+function errorDetails(error: unknown, category: string, message: string): StructuredError {
+  if (typeof error === "object" && error !== null && "details" in error) {
+    const details = (error as { readonly details?: unknown }).details;
+    const parsed = structuredErrorSchema.safeParse(details);
+    if (parsed.success) return parsed.data;
+  }
+  return {
+    category,
+    message: error instanceof Error ? `${message} ${error.message}` : message,
+    retryable: false,
+    sideEffectStatus: "none",
+    recovery: "Restore durable storage and retry before executing the tool.",
+  };
 }

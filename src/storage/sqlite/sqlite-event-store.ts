@@ -42,106 +42,127 @@ export class SqliteEventStore implements EventStore, EventSubscriber {
     const parsed = parseAgentEvent(event);
     if (!parsed.ok) throw new EventStoreError(parsed.error);
     const fact = parsed.value;
-    const encoded = encodeAgentEvent(fact);
-    const database = this.#storage.database;
-
+    let result: EventAppendResult;
     try {
-      database.exec("BEGIN IMMEDIATE");
-      const existingById = database
-        .prepare(`${EVENT_COLUMNS} WHERE event_id = ?`)
-        .get(fact.eventId);
-      if (existingById) {
-        const storedFact = decodeAgentEvent(existingById as unknown as StoredAgentEventRow);
-        const storedEncoding = encodeAgentEvent(storedFact);
-        if (storedEncoding.json === encoded.json && storedEncoding.hash === encoded.hash) {
-          validateWatermark(database, fact.sessionId);
-          database.exec("COMMIT");
-          return "duplicate";
-        }
-        throw eventStoreError(
-          "event_id_conflict",
-          `Event ID ${fact.eventId} already exists with different contents.`,
-          "Stop the session and inspect the conflicting trace before retrying.",
-        );
-      }
-
-      const occupiedSequence = database
-        .prepare("SELECT event_id FROM agent_events WHERE session_id = ? AND sequence = ?")
-        .get(fact.sessionId, fact.sequence);
-      if (occupiedSequence) {
-        throw eventStoreError(
-          "event_sequence_conflict",
-          `Event sequence ${fact.sequence} is already occupied in Session ${fact.sessionId}.`,
-          "Reload the Session facts and allocate a sequence greater than the current watermark.",
-        );
-      }
-
-      const session = database
-        .prepare("SELECT last_sequence, deletion_state FROM sessions WHERE session_id = ?")
-        .get(fact.sessionId);
-      if (!session) {
-        throw storageError(
-          "session_not_found",
-          `Session ${fact.sessionId} does not exist.`,
-          false,
-          "Create the Session, root Task, and session.created fact atomically first.",
-        );
-      }
-      if (session.deletion_state !== "active") {
-        throw storageError(
-          "session_deleting",
-          `Session ${fact.sessionId} is being deleted.`,
-          false,
-          "Do not append new facts after Session deletion begins.",
-        );
-      }
-      const previousSequence = readInteger(session.last_sequence, "last_sequence");
-      if (fact.sequence <= previousSequence) {
-        throw eventStoreError(
-          "event_sequence_conflict",
-          `Event sequence ${fact.sequence} is not greater than ${previousSequence}.`,
-          "Reload the Session sequence and append a new fact above the persisted watermark.",
-        );
-      }
-
-      const task = database
-        .prepare("SELECT session_id FROM tasks WHERE task_id = ?")
-        .get(fact.taskId);
-      if (!task || task.session_id !== fact.sessionId) {
-        throw storageError(
-          "task_not_found",
-          `Task ${fact.taskId} does not belong to Session ${fact.sessionId}.`,
-          false,
-          "Persist the Task metadata before appending facts that reference it.",
-        );
-      }
-
-      insertEvent(database, fact, encoded.json, encoded.hash);
-      this.#faultInjector?.hit("event_after_insert");
-
-      const update = database
-        .prepare(
-          `UPDATE sessions
-             SET last_sequence = ?, updated_at = ?
-           WHERE session_id = ? AND last_sequence = ? AND deletion_state = 'active'`,
-        )
-        .run(fact.sequence, this.#storage.clock.utcNow(), fact.sessionId, previousSequence);
-      if (update.changes !== 1) {
-        throw eventStoreError(
-          "event_sequence_conflict",
-          `Session ${fact.sessionId} sequence watermark changed during append.`,
-          "Reload the Session sequence and retry with a fresh event identity.",
-        );
-      }
-      database.exec("COMMIT");
+      result = this.#storage.runImmediateTransaction(() => this.appendWithinTransaction(fact));
     } catch (error: unknown) {
-      rollback(database);
       if (error instanceof EventStoreError || error instanceof StorageError) throw error;
       throw translateStorageError(error);
     }
 
-    await this.#notify(fact.sessionId, fact);
+    if (result === "inserted") await this.notifyCommitted(fact);
+    return result;
+  }
+
+  /** Synchronous C08/C11 primitive; caller owns the active BEGIN IMMEDIATE transaction. */
+  appendWithinTransaction(event: AgentEvent): EventAppendResult {
+    if (!this.#storage.isImmediateTransactionActive) {
+      throw storageError(
+        "storage_transaction_required",
+        "AgentEvent append requires an active execution transaction.",
+        false,
+        "Use SqliteStorageDatabase.runImmediateTransaction for an atomic journal boundary.",
+      );
+    }
+    const parsed = parseAgentEvent(event);
+    if (!parsed.ok) throw new EventStoreError(parsed.error);
+    const fact = parsed.value;
+    const encoded = encodeAgentEvent(fact);
+    const database = this.#storage.database;
+
+    const existingById = database
+        .prepare(`${EVENT_COLUMNS} WHERE event_id = ?`)
+        .get(fact.eventId);
+    if (existingById) {
+      const storedFact = decodeAgentEvent(existingById as unknown as StoredAgentEventRow);
+      const storedEncoding = encodeAgentEvent(storedFact);
+      if (storedEncoding.json === encoded.json && storedEncoding.hash === encoded.hash) {
+        validateWatermark(database, fact.sessionId);
+        return "duplicate";
+      }
+      throw eventStoreError(
+        "event_id_conflict",
+        `Event ID ${fact.eventId} already exists with different contents.`,
+        "Stop the session and inspect the conflicting trace before retrying.",
+      );
+    }
+
+    const occupiedSequence = database
+      .prepare("SELECT event_id FROM agent_events WHERE session_id = ? AND sequence = ?")
+      .get(fact.sessionId, fact.sequence);
+    if (occupiedSequence) {
+      throw eventStoreError(
+        "event_sequence_conflict",
+        `Event sequence ${fact.sequence} is already occupied in Session ${fact.sessionId}.`,
+        "Reload the Session facts and allocate a sequence greater than the current watermark.",
+      );
+    }
+
+    const session = database
+      .prepare("SELECT last_sequence, deletion_state FROM sessions WHERE session_id = ?")
+      .get(fact.sessionId);
+    if (!session) {
+      throw storageError(
+        "session_not_found",
+        `Session ${fact.sessionId} does not exist.`,
+        false,
+        "Create the Session, root Task, and session.created fact atomically first.",
+      );
+    }
+    if (session.deletion_state !== "active") {
+      throw storageError(
+        "session_deleting",
+        `Session ${fact.sessionId} is being deleted.`,
+        false,
+        "Do not append new facts after Session deletion begins.",
+      );
+    }
+    const previousSequence = readInteger(session.last_sequence, "last_sequence");
+    if (fact.sequence <= previousSequence) {
+      throw eventStoreError(
+        "event_sequence_conflict",
+        `Event sequence ${fact.sequence} is not greater than ${previousSequence}.`,
+        "Reload the Session sequence and append a new fact above the persisted watermark.",
+      );
+    }
+
+    const task = database
+      .prepare("SELECT session_id FROM tasks WHERE task_id = ?")
+      .get(fact.taskId);
+    if (!task || task.session_id !== fact.sessionId) {
+      throw storageError(
+        "task_not_found",
+        `Task ${fact.taskId} does not belong to Session ${fact.sessionId}.`,
+        false,
+        "Persist the Task metadata before appending facts that reference it.",
+      );
+    }
+
+    insertEvent(database, fact, encoded.json, encoded.hash);
+    this.#faultInjector?.hit("event_after_insert");
+
+    const update = database
+      .prepare(
+        `UPDATE sessions
+             SET last_sequence = ?, updated_at = ?
+           WHERE session_id = ? AND last_sequence = ? AND deletion_state = 'active'`,
+      )
+      .run(fact.sequence, this.#storage.clock.utcNow(), fact.sessionId, previousSequence);
+    if (update.changes !== 1) {
+      throw eventStoreError(
+        "event_sequence_conflict",
+        `Session ${fact.sessionId} sequence watermark changed during append.`,
+        "Reload the Session sequence and retry with a fresh event identity.",
+      );
+    }
     return "inserted";
+  }
+
+  /** Publish only after the caller's journal transaction has committed. */
+  async notifyCommitted(event: AgentEvent): Promise<void> {
+    const parsed = parseAgentEvent(event);
+    if (!parsed.ok) throw new EventStoreError(parsed.error);
+    await this.#notify(parsed.value.sessionId, parsed.value);
   }
 
   async list(sessionId: StableId, afterSequence?: number): Promise<readonly AgentEvent[]> {
@@ -229,10 +250,6 @@ export function insertEvent(
       hash,
       json,
     );
-}
-
-function rollback(database: DatabaseSync): void {
-  if (database.isTransaction) database.exec("ROLLBACK");
 }
 
 function readInteger(value: unknown, column: string): number {

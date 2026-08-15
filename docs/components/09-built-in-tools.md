@@ -320,6 +320,12 @@ output: { commitSha: string; remoteBranch: string; prUrl: string;
 
 ## 11. 整体验收标准
 
+### 11.1 Issue #7 首个只读切片（已冻结）
+
+核心闭环首先注册 `list_files`、`search_text`、`read_file`、`git_status`、`git_diff`、`git_log`。六者均为 `risk=automatic`、`sideEffect=none`、`retryPolicy=safe`，只允许经 `ToolRegistry -> PermissionEngine -> ToolRuntime` 执行。工作区 provider 必须拒绝绝对路径、`..` 越界与 link/junction 跟随；命令使用参数数组且禁用 shell；读取、搜索、目录和 Git 输出必须有确定上限并响应 AbortSignal/deadline。所有 Git 读取使用 `--no-optional-locks`，以 `GIT_LITERAL_PATHSPECS=1` 和 `./` 前缀封闭 pathspec magic，并从允许列表构造子进程环境；工作区是仓库子目录时，status/diff/log 也只能观察该子树。`read_file` 只接受 UTF-8 并返回整文件 SHA-256。其余十二个工具仍按 D1 延期，不以占位实现计入覆盖。
+
+`search_text` 优先使用 `rg`；当部署环境不存在该可执行文件时，允许切换到内建 Node provider，但必须保持相同工作区/忽略目录/UTF-8/取消边界，并额外限制 10 秒、10,000 文件、20 MB 总读取量、2 MB 单文件和请求的 `maxMatches`。只有 executable-not-found 才能触发 fallback；regex、权限或其他 provider 错误继续显式失败。
+
 - `TOOLS-AC-001`：18 个 ToolDefinition 全部通过 schema、策略组合和模型投影测试。
 - `TOOLS-AC-002`：所有文件/命令路径穿越、junction 和并发版本 fixture 被阻止。
 - `TOOLS-AC-003`：六个只读工具可完成“阅读并解释仓库”的完整 trace。

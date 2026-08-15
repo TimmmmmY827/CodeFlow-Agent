@@ -128,6 +128,8 @@ interface ToolCatalogManifest {
 
 ## 8. 验收标准
 
+Issue #7 的只读纵向切片使用 `ToolRegistry.listForModel()` 从 Runtime 同一份 Zod input schema 生成 Draft-07 JSON Schema；投影失败必须在模型调用前中止。投影默认 `strict=false` 以兼容 DeepSeek 标准 endpoint，Runtime 仍以同一 Zod schema 做权威校验；只有显式切换 `/beta` endpoint 才可由组装层升级 strict。该投影只输出 JSON 结构，不让 C07 依赖具体模型 SDK。
+
 - `REG-AC-001`：18 个 MVP 工具都有唯一 name/version、输入/输出 schema 和合法策略组合。
 - `REG-AC-002`：重名、非法策略组合和不可投影 schema 在启动测试中失败。
 - `REG-AC-003`：Model tool 列表与 Runtime registry 名称/schema hash 一致。
