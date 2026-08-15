@@ -53,7 +53,28 @@ export type {
   SessionView,
   TraceIntegrityReport,
 } from "./events/state-reducer.js";
+export { DeepSeekChatAdapter } from "./model/deepseek-chat-adapter.js";
+export type {
+  DeepSeekChatOptions,
+  DeepSeekCompletionRequestOptions,
+  DeepSeekCompletionTransport,
+} from "./model/deepseek-chat-adapter.js";
 export { DeepSeekResponsesAdapter } from "./model/deepseek-responses-adapter.js";
+export {
+  MODEL_ADAPTER_PROTOCOL_VERSION,
+  ModelAdapterError,
+} from "./model/model-adapter.js";
+export type {
+  ModelAdapter,
+  ModelCapabilities,
+  ModelFailure,
+  ModelInputItem,
+  ModelRequest,
+  ModelResponse,
+  ModelToolCall,
+  ModelToolDefinition,
+  ModelUsage,
+} from "./model/model-adapter.js";
 export {
   BudgetController,
   BudgetTimer,

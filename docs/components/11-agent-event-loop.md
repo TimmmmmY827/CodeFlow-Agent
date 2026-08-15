@@ -31,7 +31,7 @@
 | --- | --- | --- |
 | C01/C02 | 生命周期、持久化事件 writer、reducer 和恢复查询稳定 | 创建内存 Session |
 | C03/C04 | 权限和 reserve/commit 预算 API | 不得执行工具/模型 |
-| C05 | 流式文本/tool call/usage 契约通过 fixtures | 不得进入真实模型循环 |
+| C05 | 非流式文本/tool call/usage 契约通过 fixtures；一次调用仅一个 provider attempt | 不得进入 Issue #7 的最小真实模型循环 |
 | C06 | ContextManifest 和溢出策略 | 不得发送项目上下文 |
 | C08/C09 | Runtime + 六只读工具 | 只允许解释固定输入 |
 | C10 | finish_task/Gate 事件链 | 不得宣称 verified completion |
@@ -49,7 +49,7 @@ while (!terminal) {
     reservation: "model-call upper bound",
     event: "model.started"
   }); // reservation + model.started 同事务并持久化确认
-  const modelResult = await collect(model.stream({ ...context, ...modelCall.identity }));
+  const modelResult = await model.generate({ ...context, signal, deadlineAt });
   await modelJournal.finish(modelCall, modelResult); // usage 结算 + model.completed
 
   publishVisiblePlanAndSummary(modelResult);

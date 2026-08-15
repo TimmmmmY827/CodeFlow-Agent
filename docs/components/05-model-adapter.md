@@ -1,167 +1,157 @@
-# C05 ModelAdapter 与 DeepSeekResponsesAdapter
+# C05 ModelAdapter 与 DeepSeekChatAdapter
 
-- 状态：非流式文本最小实现，tool calling/续接/协议测试缺失
-- 目标阶段：D2
-- 代码位置：`src/model/model-adapter.ts`、`deepseek-responses-adapter.ts`
+- 状态：Issue #7 最小闭环切片已实现；非流式文本、单/多 tool calling、本地 transcript 重建、usage、取消和稳定错误已交付
+- 目标阶段：D2；SSE、reasoning continuation 与真实 API smoke test 延后到核心闭环验证后
+- 代码位置：`src/model/model-adapter.ts`、`deepseek-chat-adapter.ts`；`deepseek-responses-adapter.ts` 仅保留兼容别名
+- 测试位置：`tests/model-adapter.test.ts`
 - 硬依赖：[C00](00-shared-contracts.md)、[C01](01-event-state.md)
 - 下游消费者：C06、C11、C14、C15
+- 主线决策：[Issue #7](https://github.com/TimmmmmY827/CodeFlow-Agent/issues/7)
 
 ## 1. 目标
 
-把 DeepSeek Responses API 转换成供应商无关的模型流，使 AgentEventLoop 能接收文本、计划、工具调用、reasoning 续接项、用量和错误，而不依赖 OpenAI SDK 类型。
+把 DeepSeek 官方 Chat Completions tool-calling 协议转换成供应商无关的单次模型结果，使 AgentEventLoop 能接收文本、完整工具调用、用量和稳定错误，而不依赖 OpenAI SDK 类型。
+
+Issue #7 固定了当前优先级：先用 `deepseek-v4-flash` 跑通“模型→本地只读工具→观察→重规划”闭环，再按真实证据补 SSE 和 reasoning continuation。DeepSeek 当前官方 tool-calling 文档使用 Chat Completions，而不是旧设计假设的 Responses API，因此 Provider 已按官方协议修正；旧类名只作为兼容别名，不再代表实际传输协议。
 
 ## 2. 职责边界
 
-### 必须负责
+### 当前必须负责
 
-- 请求构造、SSE 解析、供应商事件归一化和 AbortSignal。
-- 文本增量、工具调用参数增量、完成项和 usage。
-- 协议要求的 reasoning item 内部续接，但不向普通 UI/导出暴露。
-- DeepSeek 错误分类、有限重试提示和响应 ID。
-- 模型/供应商能力声明。
+- 构造非流式 Chat Completions 请求，只发送本地声明的 function tools。
+- 一次 `generate` 只发起一次供应商业务请求；Adapter 和 SDK 都不自动重试。
+- 按供应商顺序返回零个、一个或多个完整 tool call；参数必须是完整 JSON object，不猜测修复。
+- 用本地 transcript 的 message、assistant tool calls 和 tool result 重建多轮输入，不依赖服务端 Session。
+- 归一化 input/output/cached/total token、响应 ID、模型 ID、finish reason 和耗时；未知价格保持 `costUsd=null`。
+- 传递取消和 deadline，提供稳定错误 category、retryable、retry-after 和 provider response ID。
+- 暴露能力矩阵，明确当前不支持 streaming、reasoning continuation 和服务端工具。
 
 ### 明确不负责
 
-- 执行工具、批准权限、构建完整项目上下文或决定任务完成。
-- 在 Adapter 内自动联网搜索或保存 Session。
+- 执行工具、批准权限、构建完整项目上下文、决定任务完成或执行重试。
+- 在 Adapter 内自动联网搜索、保存 Session、写 AgentEvent 或把模型输出当作授权/验证事实。
+- 在 C14 敏感 transcript 能力完成前启用 thinking/reasoning 原文续接。
 
 ## 3. 前置依赖与解锁条件
 
-| 依赖 | 需要稳定的能力 | 未满足时禁止 |
+| 依赖 | 已使用的稳定能力 | 边界 |
 | --- | --- | --- |
-| C00 | usage、结构化错误、取消和序列化类型 | 定义公共 Adapter 返回值 |
-| C01 | model started/completed、span 和结构化失败 context 所需字段 | 接入 AgentEventLoop |
+| C00 | usage、结构化错误、取消、固定 UTC 与 JSON 类型 | 公共返回值和 Provider 边界不泄漏 SDK 类型 |
+| C01 | model started/completed、span 和结构化失败 context | C11 负责把模型调用结果写成事实，C05 不直接写事件 |
 
-C05 的 tool call 契约必须在 C11 开发真实循环前冻结；C06 依赖其输入 item 与工具 schema 格式。
+C05 的非流式 tool-call 契约已可供 Issue #7 的 C11 最小循环接线。若 C11 需要改变该公共契约，必须先更新本文件和 C05 契约测试，再审计 C06/C14/C15。
 
-## 4. 公共接口
-
-### 4.1 当前可编译基线
-
-当前接口只有 `generate({ input: string, signal, deadlineAt })`，返回一次性 `outputText`、response ID 和 usage；没有 tools、stream、continuation、capabilities 或结构化错误流。
-
-### 4.2 目标接口（规划中）
-
-下列流式接口须在 C05 契约测试完成后才能供 C06/C11 接线：
+## 4. 当前公共接口
 
 ```ts
-interface ModelRequest {
-  runId: StableId;
-  stepId: StableId;
-  spanId: StableId;
-  modelCallId: StableId;
-  attempt: number;
+interface ModelToolDefinition {
+  name: string;
+  description: string;
+  parameters: JsonObject;
+  strict?: boolean;
+}
+
+interface ModelToolCall {
+  callId: string;
+  name: string;
+  argumentsJson: string; // 供应商返回的完整字节顺序
+  arguments: JsonObject; // 完整响应后解析，不修复非法 JSON
+}
+
+type ModelInputItem =
+  | { type: "message"; role: "system" | "user" | "assistant"; content: string }
+  | { type: "assistant_tool_calls"; content: string | null; calls: ModelToolCall[] }
+  | { type: "tool_result"; callId: string; output: string };
+
+interface ModelRequest extends CancellationContext {
+  input: string | ModelInputItem[];
+  tools?: ModelToolDefinition[];
+  toolChoice?: "auto" | "none" | "required";
+  maxOutputTokens?: number;
+}
+
+interface ModelResponse {
+  responseId: string;
   model: string;
-  input: ModelInputItem[];
-  tools: ModelToolDefinition[];
-  reasoningEffort: "low" | "medium" | "high";
-  maxOutputTokens: number;
-  continuation: ModelContinuationHandle | null;
-  signal: AbortSignal;
-}
-
-type ModelStreamEvent =
-  | (ModelEventIdentity & { type: "response.started"; responseId: string })
-  | (ModelEventIdentity & { type: "text.delta"; delta: string })
-  | (ModelEventIdentity & { type: "tool_call.delta"; callId: string; name: string; argumentsDelta: string })
-  | (ModelEventIdentity & { type: "tool_call.completed"; call: ModelToolCall })
-  | (ModelEventIdentity & { type: "reasoning.continuation"; handle: ModelContinuationHandle })
-  | (ModelEventIdentity & { type: "usage"; usage: UsageRecord; completeness: "partial" | "final" })
-  | (ModelEventIdentity & { type: "response.completed"; finishReason: string })
-  | (ModelEventIdentity & { type: "response.failed"; error: StructuredError; retryAdvice: RetryAdvice });
-
-interface ModelEventIdentity {
-  runId: StableId;
-  stepId: StableId;
-  spanId: StableId;
-  modelCallId: StableId;
-  attempt: number;
-  responseId: string | null;
-}
-
-interface ModelContinuationHandle {
-  handleId: StableId;
-  provider: string;
-  protocolVersion: string;
-  contentHash: string;
-}
-
-interface RetryAdvice {
-  allowed: boolean;
-  reasonCode: string;
-  retryAfterMs: number | null;
-  emittedCompleteToolCall: boolean;
-  usageCompleteness: "none" | "partial" | "final";
+  outputText: string;
+  toolCalls: ModelToolCall[];
+  finishReason: string;
+  usage: ModelUsage;
 }
 
 interface ModelAdapter {
+  provider: string;
+  model: string;
   capabilities(): ModelCapabilities;
-  stream(request: ModelRequest): AsyncIterable<ModelStreamEvent>;
+  generate(request: ModelRequest): Promise<ModelResponse>;
 }
 ```
 
-`ModelStreamEvent` 是 Adapter 与 Loop 之间的归一化运行时流，不与 `AgentEvent` 类型一一对应；C11 应聚合 delta，并按 C01 目录写入 `model.started`/`model.completed`，失败或取消由 completed 事实的 operation/error context 表达。
+`MODEL_ADAPTER_PROTOCOL_VERSION` 当前为 `model-adapter:v1`。输入 string 只是单条 user message 的兼容简写；真实循环应保存并传回 `ModelInputItem[]`。`assistant_tool_calls` 保留一次响应中多个调用的分组，紧随其后的 `tool_result` 用 call ID 配对。
 
-Continuation handle 只引用 C14 敏感 transcript 中的 provider blob；普通事件、ContextManifest 和导出不保存原文。Adapter 通过注入的敏感记录 resolver 读取 handle，不允许核心层解释供应商 reasoning 数据。
+核心层只看这些归一化对象；OpenAI SDK 类型只能出现在 DeepSeek Provider 文件内。`DeepSeekCompletionTransport` 是无 SDK 类型的测试边界，不是另一个模型协议。
 
-核心层只看归一化 item；DeepSeek/OpenAI SDK 原始对象只能在 Provider 内部出现。
+## 5. 当前功能需求
 
-## 5. 功能需求
+- `MODEL-FR-001`：支持单次响应返回零个、一个或多个 tool call，并保持 call ID、调用顺序与 `argumentsJson` 字节顺序。
+- `MODEL-FR-002`：工具参数只在完整响应后解析为 JSON object；非法、截断、重复 call ID 或非法工具名返回 `model_invalid_tool_call`，不得交给 C08。
+- `MODEL-FR-004`：多轮请求由本地 transcript 重建，不发送 `previous_response_id`，不依赖服务端 Session。
+- `MODEL-FR-005`：usage 包括 input/output/cached/total token；未知价格保持 `costUsd=null` 并保留供应商 usage JSON。
+- `MODEL-FR-006`：只注册本地 function tool；不启用服务端搜索、MCP 或其他供应商工具。
+- `MODEL-FR-008`：能力矩阵明确声明 `streaming=false`、`reasoningContinuation=false`；不支持参数在发请求前拒绝。
+- `MODEL-FR-009`：一次 `generate` 只对应一个供应商业务 attempt；OpenAI SDK 配置 `maxRetries=0`。C11 在 C04 `maxRetriesPerOperation` 内创建新 attempt。
+- `MODEL-FR-011`：C11 按 modelCallId+attempt 结算；Adapter 永远不伪造价格。Issue #7 要求 C11 接线时优先使用版本化 DeepSeek 本地定价表，仍未知则让 C04 进入 `pricing_unknown`。
 
-- `MODEL-FR-001`：支持单次响应返回零个、一个或多个 tool call，并保持 call ID 与参数字节顺序。
-- `MODEL-FR-002`：工具参数只在 `tool_call.completed` 后交给 C08；不对不完整 JSON 猜测修复。
-- `MODEL-FR-003`：reasoning 续接 item 按供应商协议原样保存到敏感 transcript，普通 UI 只收到计划/决策摘要。
-- `MODEL-FR-004`：多轮请求由本地 transcript 重建，不依赖服务端 Session 状态。
-- `MODEL-FR-005`：usage 包括 input/output/cached token；未知价格不伪造成本。
-- `MODEL-FR-006`：DeepSeek 服务端搜索默认不启用，避免绕过本地工具权限和 trace。
-- `MODEL-FR-007`：流式事件必须携带 response/span 关联信息，断流后能判断是否已有可见文本、完整 tool call 或未知 usage。
-- `MODEL-FR-008`：Adapter 暴露能力矩阵，不支持的参数在请求前拒绝或显式降级。
-- `MODEL-FR-009`：Adapter 的一次 `stream` 调用只对应一个供应商业务 attempt，不自行执行完整请求重试；它返回稳定 retry advice，由 C11 在 C04 `maxRetriesPerOperation` 内决定是否创建下一 attempt。模型策略默认上限可为 2，但有效上限必须取模型策略与 C04 用户预算中的更小值，不能在 Adapter 内独立计数。
-- `MODEL-FR-010`：只有 `response.completed` 且 tool call 参数全部 completed 时聚合结果才是 complete；断流后的文本、tool call 和 usage 分别标记完整性，不能合并成伪造成功。
-- `MODEL-FR-011`：partial/final usage 使用 modelCallId+attempt 幂等结算；Adapter 未知价格保持 `costUsd=null`，C11 必须优先用版本化本地定价表计算结算费用。仍未知时 C04 snapshot 进入 `pricing_unknown` 并阻断新付费调用；后续重新计价必须追加含累计费用、pricing version 和 reason 的审计 adjustment，不能覆盖旧 usage。
-
-## 6. DeepSeek 配置
+## 6. DeepSeek 配置与协议
 
 - 默认模型：`deepseek-v4-flash`。
-- API：Responses API，thinking 开启，评估基线 `reasoning.effort=high`。
-- Key：只从 `DEEPSEEK_API_KEY` 或未来系统凭证读取。
-- base URL：Provider 配置，不进入 Agent core。
-- 模型、base URL、超时和 reasoning effort 进入配置版本与 trace；Key 不进入。
+- API：官方 OpenAI-compatible Chat Completions，非流式，`n=1`。
+- thinking：当前显式关闭；reasoning continuation 等 C14 敏感 transcript 后再启用。
+- tools：function only，最多 128 个，默认 `tool_choice=auto`，允许并行返回但由 C11/C08 决定实际调度。
+- strict schema：只允许在明确配置 `/beta` endpoint 时启用；标准 endpoint 请求前拒绝。
+- Key：由 composition root 从 `DEEPSEEK_API_KEY` 或未来系统凭证注入；不进入 core、trace 或错误 message。
+- base URL/模型/超时：属于 Provider 配置；配置版本由 C11/C12 记录，Adapter 不记录秘密。
+
+协议依据：[DeepSeek Tool Calls](https://api-docs.deepseek.com/guides/tool_calls)、[Create Chat Completion](https://api-docs.deepseek.com/api/create-chat-completion)。
 
 ## 7. 错误、重试与恢复
 
-| category | 可重试 | 处理 |
+| category | 可重试 | 当前处理 |
 | --- | --- | --- |
-| `model_rate_limited` | 是 | 返回 retry-after 建议，由 C11 决定新 attempt |
-| `model_timeout` | 是 | 报告已产生的事件/usage，由 C11 判断是否可重试 |
-| `model_stream_interrupted` | 条件 | 保存已收到 item，默认暂停而非拼接猜测 |
-| `model_invalid_tool_call` | 否 | 记录原始 artifact，回到循环要求模型重规划 |
-| `model_auth_failed` | 否 | 请求用户配置，不输出 Key |
-| `model_context_overflow` | 条件 | 交 C06 建检查点后重试一次 |
-| `model_protocol_changed` | 否 | 契约失败，停止 Session |
+| `cancelled` | 否 | 停止当前请求，不创建新 attempt |
+| `model_rate_limited` | 是 | 返回 retry-after，由 C11/C04 决定是否新建 attempt |
+| `model_timeout` | 是 | 当前非流式响应没有可提交的 partial result；由 C11 决定重试 |
+| `model_invalid_tool_call` | 否 | 不修复参数，不执行工具；要求模型重新规划 |
+| `model_auth_failed` | 否 | 请求用户检查配置，错误不包含 Key |
+| `model_context_overflow` | 条件 | 交 C06 压缩后由 C11 决定一次新 attempt |
+| `model_invalid_request` | 否 | 修正模型配置或工具 schema |
+| `model_service_unavailable` | 是 | 由 C11/C04 控制新 attempt |
+| `model_protocol_changed` | 否 | fail closed，更新 Provider 契约后再恢复 |
+
+任何 Provider 异常只产生稳定、脱敏 message；原始 SDK Error 不跨 Adapter 边界。
 
 ## 8. 安全与隐私
 
-- `MODEL-SR-001`：发送前调用秘密检测器；命中疑似凭证时停止并说明字段来源。
-- `MODEL-SR-002`：不把整仓库、环境变量全集或 Git 凭证默认发送。
-- `MODEL-SR-003`：reasoning item 使用敏感存储和删除传播，不能进入脱敏导出。
-- `MODEL-SR-004`：模型输出是建议，不是授权、验证证据或外部事实。
+- `MODEL-SR-001`：完整秘密检测器随 C06 ContextManifest 接线实现；当前调用者不得把未筛选的整仓库或环境变量作为 input。此项仍显式延期，不能据此宣称 C05 全量完成。
+- `MODEL-SR-002`：Adapter 不读取工作区、环境变量全集或 Git 凭证；它只发送调用者显式传入的 input/tools。
+- `MODEL-SR-003`：当前关闭 reasoning；后续启用必须先接 C14 敏感存储、删除传播和脱敏导出。
+- `MODEL-SR-004`：模型文本和 tool call 是建议，不是授权、验证证据或外部事实；C03/C08/C10 仍是安全权威。
 
-## 9. 验收标准
+## 9. 验收证据
 
-- `MODEL-AC-001`：固定 SSE fixtures 覆盖文本、单/多 tool call、参数分片、usage、reasoning 和完成顺序。
-- `MODEL-AC-002`：断流发生在每一种事件边界时，归一化结果确定且无伪造 completed。
-- `MODEL-AC-003`：AbortSignal 在 2 秒内停止读取流且不发起重试。
-- `MODEL-AC-004`：reasoning 续接可完成工具调用后的下一轮，但普通 trace 导出找不到其原文。
-- `MODEL-AC-005`：Provider 错误全部映射为稳定 category；核心测试不 import SDK 类型。
-- `MODEL-AC-006`：至少一次受控真实 API smoke test 记录模型 ID、协议版本、usage 和成本。
-- `MODEL-AC-007`：Adapter fixture 证明单次 stream 最多发起一次供应商业务请求，重试次数不会与 C11 相乘。
-- `MODEL-AC-008`：每个流事件都有稳定 run/step/span/call/attempt 关联，晚到和跨 attempt 事件不会被错误聚合。
+Issue #7 当前切片：
 
-## 10. 实现任务建议
+- `MODEL-AC-MVP-001`：`tests/model-adapter.test.ts` 覆盖文本、单/多 tool call、调用顺序、完整 JSON 参数和 usage。
+- `MODEL-AC-MVP-002`：fixture 覆盖本地 transcript 重建，且请求不使用服务端 Session/response continuation。
+- `MODEL-AC-MVP-003`：取消、过期 deadline、rate limit、协议漂移和非法 tool call 映射为稳定错误；所有路径单次 `generate` 最多调用一次 transport。
+- `MODEL-AC-MVP-004`：能力矩阵和请求 fixture 证明 streaming、thinking 和服务端搜索未启用；核心契约不 import SDK 类型。
+- `MODEL-AC-MVP-005`：`pnpm check` 与 `pnpm start -- --help` 是交付门禁。
 
-1. 扩展公共 ModelInput/StreamEvent/ToolCall schema。
-2. 建 DeepSeek SSE 录制 fixture 和重放器。
-3. 实现流式解析、参数汇聚、usage 与 reasoning continuation。
-4. 实现错误翻译、取消和重试边界。
-5. 通过契约测试后交给 C06/C11，不先在 Loop 中解析供应商事件。
+核心闭环跑通后再验收：SSE 事件顺序/断流完整性、2 秒内停止流读取、reasoning continuation 与脱敏导出、真实 API smoke test、跨 attempt 事件身份。这些项目未实现，不用空实现标记完成。
+
+## 10. 下一步接线
+
+1. C11 使用 `generate` 做一次 durable model attempt，并把 response/tool calls/usage 投影到本地 transcript 与 C01 事实。
+2. C09 先提供 Issue #7 的六个只读工具，C11 通过 C08 执行；ModelAdapter 绝不直接调用工具。
+3. C11 加入版本化 DeepSeek 定价表并通过 C04 reserve→execute→settle。
+4. 第一条端到端可审计 trace 完成后，再依据真实延迟与恢复问题决定是否升级到流式 `model-adapter:v2`。

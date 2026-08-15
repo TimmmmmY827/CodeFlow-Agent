@@ -12,7 +12,7 @@ flowchart TB
     LOOP --> MODEL["ModelAdapter"]
     LOOP --> TOOLS["ToolRegistry + ToolRuntime"]
     LOOP --> POLICY["PermissionEngine + BudgetController"]
-    MODEL --> DS["DeepSeekResponsesAdapter"]
+    MODEL --> DS["DeepSeekChatAdapter"]
     TOOLS --> LOCAL["Workspace / Command / Git"]
     TOOLS --> EXTERNAL["Exa / GitHub"]
     LOOP --> EVENTS["Append-only AgentEvent"]
@@ -30,7 +30,7 @@ flowchart TB
 | Application Service | 组装依赖、管理用例和生命周期 | 供应商协议细节 |
 | AgentEventLoop | 驱动模型—工具—观察循环和重规划 | 写死 Bug/功能流程 |
 | ContextAssembler | 指令优先级、按需代码、检查点和上下文预算 | 长期记忆/RAG |
-| ModelAdapter | 隔离模型协议、流式事件和用量 | 直接执行工具 |
+| ModelAdapter | 隔离模型协议、tool calls、用量和取消；当前先走非流式闭环 | 直接执行工具 |
 | ToolRegistry/Runtime | 工具定义、参数校验、执行和统一结果 | 绕过权限执行 |
 | Permission/Budget | 风险判断、批准绑定、调用/时间/费用限制 | 修改事件事实 |
 | Event/State | 保存不可变事实并投影任务树 | 存储原始秘密 |
