@@ -40,7 +40,7 @@
 | C10 | [CompletionGate](10-completion-gate.md) | D4 | 旧版 Gate；可信 Context/evidence 缺失 | C00、C01、C02 | 内置 finish、Loop、CLI、Eval |
 | C11 | [AgentEventLoop](11-agent-event-loop.md) | D3–D4 | 仅创建 Session | C01–C10 | Application、CLI、Eval |
 | C12 | [Application Service](12-application-service.md) | D3–D7 | 基础依赖组装 | C02–C11 | CLI、Session 命令、Eval |
-| C13 | [CLI/TUI 与 HITL](13-cli-tui.md) | D5 | 命令骨架 | C01、C03、C04、C11、C12、C14 | 用户、Eval |
+| C13 | [CLI/TUI 与 HITL](13-cli-tui.md) | D5 | 命令骨架 + 最简实时 Ink 任务树 | C01、C03、C04、C11、C12、C14 | 用户、Eval |
 | C14 | [Session、Trace 与生命周期治理](14-session-trace.md) | D7 | 接口/脱敏骨架 | C01、C02、C03、C12 | CLI、Eval、恢复 |
 | C15 | [Evaluation Harness](15-evaluation.md) | D8–D10 | 类型和总门槛 | C01–C14 | 发布决策 |
 
