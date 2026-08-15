@@ -1,6 +1,6 @@
 # C13 CLI/TUI、实时任务树与 HITL
 
-- 状态：Commander 命令和静态 Ink 组件骨架
+- 状态：Commander 命令骨架 + Issue #7 最简实时 Ink 任务树；命令接线与 HITL 交互仍待开发
 - 目标阶段：D5，Session 命令随 D7 完善
 - 代码位置：`src/cli/`
 - 硬依赖：[C01](01-event-state.md)、[C03](03-permission-engine.md)、[C04](04-budget-controller.md)、[C11](11-agent-event-loop.md)、[C12](12-application-service.md)、[C14](14-session-trace.md)
@@ -55,6 +55,14 @@ interface CliRecord {
 消费者必须忽略同主版本新增的未知可选字段，并拒绝未知主版本。`event` 记录中的 sequence 可作为恢复游标；普通日志、spinner、进度字符和 ANSI 永不混入 stdout。
 
 ## 4. 实时视图
+
+### 4.1 Issue #7 已交付切片
+
+当前 `SessionTaskTreeProjector` 逐条接收 C01 `AgentEvent`，并以同一个 `StateReducer` 作为生命周期、计划、验证和预算的语义权威；额外的操作树只保存事件已经公开的模型/工具名称、span、状态、耗时和结构化错误，不读取或展示 reasoning 原文。
+
+`LiveSessionTaskTree` 只依赖与 C12 `SessionHandle.streamEvents({afterSequence, signal})` 同形的 `SessionEventSource`。一个组件实例固定绑定一个逻辑 Session；上层即使重建等价 source 对象也不会导致断流重放，切换 Session 必须更换 React `key` 以显式重建投影器。它从 sequence `-1` 请求完整 replay-then-tail 流，不在 CLI 内组合 `list()` 与 `subscribe()`。相同 event ID 与完全相同内容的重复投递为幂等；event ID 或 sequence 冲突、operation hash 多候选以及 trace gap 会停止视图并显示安全错误，而不是猜测状态。
+
+最简 Ink 视图已经展示 Session/目标/workspace/生命周期、计划 revision、模型与工具树、验证、预算、UNKNOWN 对账状态和首次错误。所有动态文本在进入 Ink 前转义终端控制字符，并按当前宽度截断。当前流失败会 fail-closed 并提示恢复；带退避、取消和 last-sequence 游标的自动重连仍随生产 `run/resume` 组合延期。完整 `run/resume` 命令接线、文件/diff 面板、NDJSON、ask/approval/cancel 输入和 C14 Session 管理仍按后续切片推进。
 
 至少展示：
 
@@ -132,6 +140,8 @@ CLI 只调用 C12 `SessionHandle.streamEvents({afterSequence})` 或 C14 等价�
 - `CLI-AC-008`：NDJSON golden tests 固定 schema、stdout/stderr 分离、控制字符转义和全部退出码。
 - `CLI-AC-009`：历史重放与实时事件在每个 sequence 交界注入并发事件时均无遗漏；重复投递不会重复显示副作用。
 - `CLI-AC-010`：非 TTY、过期 request ID 和预先拒绝 policy 的测试证明不存在默认批准路径。
+
+当前 Issue #7 切片以 `tests/session-task-tree.test.ts` 固定以下证据：完整 model/tool/verification 生命周期的 ViewModel 与 Ink snapshot、重复/冲突事件、C12 形状流消费、UNKNOWN 对账、首次错误保留，以及窄终端和控制字符转义。该证据覆盖 `CLI-AC-001` 的最简实时树范围和 `CLI-SR-003`；其余验收项保持未完成，不以占位实现计入。
 
 ## 10. 实现任务建议
 

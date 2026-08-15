@@ -8,6 +8,32 @@ export type {
 } from "./agent/agent-event-loop.js";
 export { createApplication } from "./app/application.js";
 export {
+  LiveSessionTaskTree,
+  SessionTaskTree,
+  buildSessionTaskTreeLines,
+  consumeSessionEvents,
+  sanitizeTerminalText,
+} from "./cli/ui/session-task-tree.js";
+export type {
+  LiveSessionTaskTreeProps,
+  SessionEventSource,
+  SessionEventStreamOptions,
+  SessionTaskTreeLine,
+  SessionTaskTreeProps,
+  SessionTaskTreeTone,
+} from "./cli/ui/session-task-tree.js";
+export {
+  SESSION_TASK_TREE_SCHEMA_VERSION,
+  SessionTaskTreeProjectionError,
+  SessionTaskTreeProjector,
+} from "./cli/ui/session-task-tree-projector.js";
+export type {
+  SessionFirstError,
+  SessionOperationNode,
+  SessionOperationStatus,
+  SessionTaskTreeViewModel,
+} from "./cli/ui/session-task-tree-projector.js";
+export {
   CompletionGate,
   completionClaimSchema,
   safetyVetoSchema,
