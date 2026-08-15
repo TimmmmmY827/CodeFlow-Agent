@@ -159,7 +159,7 @@ interface ToolResultEnvelope<O = unknown> {
 - `RUNTIME-FR-002`：output 必须通过 output schema；失败保留原始结果为敏感 Artifact 供诊断，不传模型。
 - `RUNTIME-FR-003`：每个工具有默认 timeout 和最大 inline bytes，配置可按工具收紧。
 - `RUNTIME-FR-004`：stdout/stderr、网页和 diff 超限时写 Artifact，context 只含摘要、hash、大小和引用。
-- `RUNTIME-FR-005`：调用 started/finished 必须带相同 operation hash/span。
+- `RUNTIME-FR-005`：调用 started/finished 必须带相同精确 span，并保留相同 operation hash 作为批准/版本/参数绑定指纹；operation hash 不得代替一次调用身份。
 - `RUNTIME-FR-006`：无副作用工具失败按 retry policy 返回 retryable；可能已写的工具失败返回 `unknown` 或 `applied`，不得自动标 safe retry。
 - `RUNTIME-FR-007`：批准 required/denied 不调用 execute，不计为实际工具副作用。
 - `RUNTIME-FR-008`：取消发生在执行前返回 not_started；执行中写工具的取消可能返回 unknown。

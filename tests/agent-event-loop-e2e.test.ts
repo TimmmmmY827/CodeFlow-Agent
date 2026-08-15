@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { AgentEventLoop } from "../src/agent/agent-event-loop.js";
 import { createAgentEvent, createEventContext } from "../src/events/agent-event.js";
+import type { ExecutionJournal } from "../src/events/execution-journal.js";
 import { reduceAgentEvents } from "../src/events/state-reducer.js";
 import { DEEPSEEK_PRICING_VERSION } from "../src/model/deepseek-pricing.js";
 import { MODEL_ADAPTER_PROTOCOL_VERSION, type ModelAdapter, type ModelRequest, type ModelResponse } from "../src/model/model-adapter.js";
@@ -193,6 +194,60 @@ describe("AgentEventLoop read-only vertical slice", () => {
       "session.created", "session.started", "session.failed",
     ]);
     expect(await ledger.listEntries(bundle.session.sessionId)).toEqual([]);
+  });
+
+  it("returns a structured failure and records session.failed when model journal finish fails", async () => {
+    const workspace = await createWorkspace();
+    using storage = new SqliteStorageDatabase(":memory:", { clock });
+    const bundle = createBundle(workspace);
+    await sessionRepository(storage).create(bundle);
+    const events = new SqliteEventStore(storage);
+    const ledger = new SqliteBudgetLedger(storage);
+    await ledger.initialize({ sessionId: bundle.session.sessionId, policy, pricingVersion: DEEPSEEK_PRICING_VERSION });
+    const durableJournal = new SqliteExecutionJournal(storage, events, ledger);
+    const finishFailingJournal: ExecutionJournal = {
+      append: async (input) => await durableJournal.append(input),
+      begin: async (input) => await durableJournal.begin(input),
+      finish: async () => { throw new Error("injected model finish failure"); },
+    };
+    const registry = new ToolRegistry();
+    registerWorkspaceReadTools(registry);
+    const loop = new AgentEventLoop(events, {
+      modelAdapter: new ScriptedModelAdapter(),
+      toolRegistry: registry,
+      toolRuntime: new ToolRuntime(registry, new PermissionEngine(), { journal: finishFailingJournal }),
+      journal: finishFailingJournal,
+      completionSnapshotProvider: { capture: async () => ({ codeVersion: CODE_VERSION, diffHash: DIFF_HASH }) },
+      maxOutputTokens: 128,
+    });
+
+    const result = await loop.runReadonlySession({
+      sessionId: bundle.session.sessionId,
+      taskId: bundle.rootTask.taskId,
+      traceId: bundle.createdEvent.traceId,
+      workspacePath: workspace,
+      codeVersion: CODE_VERSION,
+      diffHash: DIFF_HASH,
+      configVersion: bundle.session.configVersion,
+      goal: bundle.session.goal,
+      signal: new AbortController().signal,
+    });
+
+    expect(result).toMatchObject({
+      status: "failed",
+      modelAttempts: 1,
+      toolCalls: 0,
+      error: { category: "model_journal_finish_failed", retryable: false },
+    });
+    const facts = await events.list(bundle.session.sessionId);
+    expect(facts.map((event) => event.type)).toEqual([
+      "session.created",
+      "session.started",
+      "model.started",
+      "session.failed",
+    ]);
+    expect(reduceAgentEvents(facts)).toMatchObject({ status: "FAILED", lastErrorCategory: "model_journal_finish_failed" });
+    await expect(ledger.listOpenReservations(bundle.session.sessionId)).resolves.toHaveLength(1);
   });
 });
 

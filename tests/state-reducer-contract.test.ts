@@ -63,7 +63,7 @@ describe("C01 event/state contracts", () => {
     });
   });
 
-  it("pairs tool facts by operation hash even when spans differ", () => {
+  it("uses an unambiguous operation hash as a legacy fallback when spans differ", () => {
     const ids = identifiers();
     const startedSpan = randomUUID();
     const view = reduceAgentEvents([
@@ -91,6 +91,28 @@ describe("C01 event/state contracts", () => {
         }),
         payload: {},
       }),
+    ]);
+
+    expect(view).toMatchObject({ status: "RUNNING", activeOperation: null });
+  });
+
+  it("tracks distinct operation spans even when concurrent calls share an operation hash", () => {
+    const ids = identifiers();
+    const firstSpan = randomUUID();
+    const secondSpan = randomUUID();
+    const operationHash = "hash-repeat-read";
+    const operation = (status: "running" | "completed") => createEventContext({
+      workspacePath: ".",
+      operation: { kind: "tool", name: "read_file", status, durationMs: status === "completed" ? 1 : null, operationHash },
+    });
+
+    const view = reduceAgentEvents([
+      created(ids, 0),
+      started(ids, 1),
+      createAgentEvent({ ...ids, sequence: 2, spanId: firstSpan, type: "tool.started", context: operation("running"), payload: {} }),
+      createAgentEvent({ ...ids, sequence: 3, spanId: secondSpan, type: "tool.started", context: operation("running"), payload: {} }),
+      createAgentEvent({ ...ids, sequence: 4, spanId: firstSpan, type: "tool.completed", context: operation("completed"), payload: {} }),
+      createAgentEvent({ ...ids, sequence: 5, spanId: secondSpan, type: "tool.completed", context: operation("completed"), payload: {} }),
     ]);
 
     expect(view).toMatchObject({ status: "RUNNING", activeOperation: null });

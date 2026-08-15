@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { CompletionGate, type CompletionClaim } from "../completion/completion-gate.js";
 import { createAgentEvent, createEventContext } from "../events/agent-event.js";
-import type { ExecutionIdentity, ExecutionJournal } from "../events/execution-journal.js";
+import type { ExecutionIdentity, ExecutionJournal, FinishExecutionInput } from "../events/execution-journal.js";
 import type { EventStore } from "../events/event-store.js";
 import { checkTraceIntegrity } from "../events/state-reducer.js";
 import { estimateDeepSeekCostUsd, priceDeepSeekUsage } from "../model/deepseek-pricing.js";
@@ -136,7 +136,14 @@ export class AgentEventLoop {
 
       if (request.signal.aborted || deadlineExceeded(request.deadlineAt ?? null)) {
         const error = cancelledError();
-        await options.journal.finish({ lease, status: "cancelled", actual: budgetDeltaSchema.parse({}), sideEffectStatus: "none", error });
+        const finishError = await finishModelExecution(options.journal, request, {
+          lease,
+          status: "cancelled",
+          actual: budgetDeltaSchema.parse({}),
+          sideEffectStatus: "none",
+          error,
+        });
+        if (finishError) return { status: "failed", outputText: null, modelAttempts, toolCalls, error: finishError };
         await appendCancelled(options.journal, request);
         return { status: "cancelled", outputText: null, modelAttempts, toolCalls, error };
       }
@@ -154,7 +161,7 @@ export class AgentEventLoop {
       } catch (error: unknown) {
         const details = modelFailure(error);
         const cancelled = details.category === "cancelled" || details.category === "deadline_exceeded";
-        await options.journal.finish({
+        const finishError = await finishModelExecution(options.journal, request, {
           lease,
           status: cancelled ? "cancelled" : "failed",
           actual: null,
@@ -162,6 +169,7 @@ export class AgentEventLoop {
           error: details,
           payload: { providerResponseId: error instanceof ModelAdapterError ? error.providerResponseId : null },
         });
+        if (finishError) return { status: "failed", outputText: null, modelAttempts, toolCalls, error: finishError };
         if (cancelled) {
           await appendCancelled(options.journal, request);
           return { status: "cancelled", outputText: null, modelAttempts, toolCalls, error: details };
@@ -173,11 +181,19 @@ export class AgentEventLoop {
       const priced = priceDeepSeekUsage(response.model, response.usage);
       if (!priced) {
         const error = failureError("model_usage_unpriced", "Provider usage could not be reconciled with the trusted pricing table.", false, "Inspect provider usage before permitting another paid call.");
-        await options.journal.finish({ lease, status: "failed", actual: null, sideEffectStatus: "none", error, payload: { responseId: response.responseId } });
+        const finishError = await finishModelExecution(options.journal, request, {
+          lease,
+          status: "failed",
+          actual: null,
+          sideEffectStatus: "none",
+          error,
+          payload: { responseId: response.responseId },
+        });
+        if (finishError) return { status: "failed", outputText: null, modelAttempts, toolCalls, error: finishError };
         await options.journal.append({ identity: request, type: "session.failed", error });
         return { status: "failed", outputText: null, modelAttempts, toolCalls, error };
       }
-      await options.journal.finish({
+      const finishError = await finishModelExecution(options.journal, request, {
         lease,
         status: "completed",
         actual: budgetDeltaSchema.parse({
@@ -197,6 +213,7 @@ export class AgentEventLoop {
           pricingVersion: priced.pricingVersion,
         },
       });
+      if (finishError) return { status: "failed", outputText: null, modelAttempts, toolCalls, error: finishError };
 
       if (response.toolCalls.length > 0) {
         input.push({ type: "assistant_tool_calls", content: response.outputText || null, calls: response.toolCalls });
@@ -283,6 +300,41 @@ export class AgentEventLoop {
 async function appendCancelled(journal: ExecutionJournal, identity: ExecutionIdentity): Promise<void> {
   await journal.append({ identity, type: "session.cancelling", payload: { requestedBy: "control" } });
   await journal.append({ identity, type: "session.cancelled", payload: { reason: "cancelled" } });
+}
+
+async function finishModelExecution(
+  journal: ExecutionJournal,
+  identity: ExecutionIdentity,
+  input: FinishExecutionInput,
+): Promise<StructuredError | null> {
+  try {
+    await journal.finish(input);
+    return null;
+  } catch (error: unknown) {
+    const cause = journalFailure(error);
+    const details = failureError(
+      "model_journal_finish_failed",
+      `The durable model result could not be recorded. ${cause.message}`,
+      false,
+      "Restore durable storage and reconcile the open model reservation before continuing the Session.",
+    );
+    try {
+      await journal.append({
+        identity,
+        type: "session.failed",
+        error: details,
+        payload: {
+          operationId: input.lease.operationId,
+          spanId: input.lease.spanId,
+          finishStatus: input.status,
+        },
+      });
+    } catch {
+      // The caller still receives a stable failure even when the storage
+      // outage also prevents the best-effort terminal Session fact.
+    }
+    return details;
+  }
 }
 
 function hashOperation(input: unknown): string {

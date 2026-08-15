@@ -197,7 +197,7 @@ export function createReadFileTool(): ToolDefinition<z.infer<typeof readFileInpu
 export function createGitStatusTool(): ToolDefinition<Record<string, never>, JsonObject> {
   return readOnlyTool("git_status", "Return machine-readable Git working tree status.", z.object({}).strict(), async (_input, context) => {
     const root = await assertGitWorkspace(context);
-    const result = await runCommand("git", ["status", "--porcelain=v1", "-z", "--untracked-files=normal", "--", "."], root, context, 256_000, [0]);
+    const result = await runGitCommand(["status", "--porcelain=v1", "-z", "--untracked-files=normal", "--", "./"], root, context, 256_000, [0]);
     const records = parseGitStatus(result.stdout);
     return { clean: records.length === 0, entries: records, truncated: result.truncated };
   });
@@ -210,8 +210,8 @@ export function createGitDiffTool(): ToolDefinition<z.infer<typeof gitDiffInputS
     const args = ["diff", "--no-ext-diff", "--no-color", "--unified=3"];
     if (input.scope === "staged") args.push("--cached");
     if (input.scope === "base" && input.base) args.push(input.base);
-    args.push("--", ...(input.paths.length > 0 ? input.paths : ["."]));
-    const result = await runCommand("git", args, root, context, input.maxBytes, [0]);
+    args.push("--", ...(input.paths.length > 0 ? input.paths.map(toGitPathspec) : ["./"]));
+    const result = await runGitCommand(args, root, context, input.maxBytes, [0]);
     return {
       scope: input.scope,
       base: input.base ?? null,
@@ -228,8 +228,9 @@ export function createGitLogTool(): ToolDefinition<z.infer<typeof gitLogInputSch
     if (input.path) await resolveWorkspacePath(root, input.path, true, false);
     const args = ["log", `--max-count=${input.maxCount}`, "--format=%H%x1f%aI%x1f%an%x1f%s%x1e"];
     if (input.from) args.push(input.from);
-    if (input.path) args.push("--", input.path);
-    const result = await runCommand("git", args, root, context, 512_000, [0]);
+    if (input.path) args.push("--", toGitPathspec(input.path));
+    else args.push("--", "./");
+    const result = await runGitCommand(args, root, context, 512_000, [0]);
     const commits = result.stdout.split("\u001e").map((value) => value.trim()).filter(Boolean).map((record) => {
       const [hash = "", authoredAt = "", author = "", subject = ""] = record.split("\u001f");
       return { hash, authoredAt, author, subject };
@@ -273,7 +274,7 @@ function assertContained(root: string, candidate: string): void {
 
 async function assertGitWorkspace(context: ToolExecutionContext): Promise<string> {
   const root = await realpath(context.workspace).catch(() => { throw toolError("workspace_unavailable", "The workspace root is unavailable.", true); });
-  const result = await runCommand("git", ["rev-parse", "--show-toplevel"], root, context, 8_192, [0], "not_a_git_repository");
+  const result = await runGitCommand(["rev-parse", "--show-toplevel"], root, context, 8_192, [0], "not_a_git_repository");
   const gitRoot = await realpath(result.stdout.trim()).catch(() => { throw toolError("git_repository_unavailable", "The Git repository root is unavailable.", true); });
   assertContained(gitRoot, root);
   return root;
@@ -317,10 +318,11 @@ async function runCommand(
   maxBytes: number,
   acceptedExitCodes: readonly number[],
   failureCategory = "command_failed",
+  environment?: NodeJS.ProcessEnv,
 ): Promise<{ stdout: string; truncated: boolean }> {
   assertActive(context);
   return await new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(command, args, { cwd, windowsHide: true, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { cwd, env: environment, windowsHide: true, shell: false, stdio: ["ignore", "pipe", "pipe"] });
     const chunks: Buffer[] = [];
     const errors: Buffer[] = [];
     let bytes = 0;
@@ -369,6 +371,57 @@ async function runCommand(
       callback();
     }
   });
+}
+
+async function runGitCommand(
+  args: readonly string[],
+  cwd: string,
+  context: ToolExecutionContext,
+  maxBytes: number,
+  acceptedExitCodes: readonly number[],
+  failureCategory = "command_failed",
+): Promise<{ stdout: string; truncated: boolean }> {
+  return await runCommand(
+    "git",
+    ["--no-optional-locks", ...args],
+    cwd,
+    context,
+    maxBytes,
+    acceptedExitCodes,
+    failureCategory,
+    gitEnvironment(),
+  );
+}
+
+function gitEnvironment(): NodeJS.ProcessEnv {
+  const allowed = new Set([
+    "APPDATA",
+    "COMSPEC",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LOCALAPPDATA",
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "TEMP",
+    "TERM",
+    "TMP",
+    "USERPROFILE",
+  ]);
+  const environment: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && allowed.has(key.toUpperCase())) environment[key] = value;
+  }
+  environment.GIT_LITERAL_PATHSPECS = "1";
+  environment.GIT_OPTIONAL_LOCKS = "0";
+  environment.GIT_TERMINAL_PROMPT = "0";
+  return environment;
+}
+
+function toGitPathspec(path: string): string {
+  const normalized = path.replaceAll("\\", "/");
+  return normalized === "." ? "./" : `./${normalized.replace(/^\.\//u, "")}`;
 }
 
 async function searchTextWithoutRipgrep(

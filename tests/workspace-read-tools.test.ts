@@ -137,6 +137,38 @@ describe("workspace read tools", () => {
     expect(commits).toEqual([expect.objectContaining({ author: "CodeFlow Test", subject: "initial fixture" })]);
   });
 
+  it("keeps Git reads inside a workspace that is a repository subdirectory", async () => {
+    git(workspace, "init");
+    git(workspace, "config", "user.name", "CodeFlow Test");
+    git(workspace, "config", "user.email", "codeflow@example.invalid");
+    await writeFile(join(workspace, "outside.txt"), "outside base\n", "utf8");
+    git(workspace, "add", "outside.txt");
+    git(workspace, "commit", "-m", "outside history");
+
+    const scopedWorkspace = join(workspace, "scoped");
+    await mkdir(scopedWorkspace);
+    await writeFile(join(scopedWorkspace, "inside.txt"), "inside base\n", "utf8");
+    git(workspace, "add", "scoped/inside.txt");
+    git(workspace, "commit", "-m", "inside history");
+    await writeFile(join(workspace, "outside.txt"), "outside secret changed\n", "utf8");
+    await writeFile(join(scopedWorkspace, "inside.txt"), "inside changed\n", "utf8");
+
+    const diff = await runtime.execute(request(scopedWorkspace, "git_diff", { scope: "working" }));
+    const magicPath = await runtime.execute(request(scopedWorkspace, "git_diff", {
+      scope: "working",
+      paths: [":/outside.txt"],
+    }));
+    const log = await runtime.execute(request(scopedWorkspace, "git_log", { maxCount: 10 }));
+
+    expect(diff).toMatchObject({ status: "completed" });
+    expect((diff.output as JsonObject | null)?.diff ?? "").toContain("inside changed");
+    expect((diff.output as JsonObject | null)?.diff ?? "").not.toContain("outside secret changed");
+    expect(magicPath).toMatchObject({ status: "completed", output: { diff: "" } });
+    expect((log.output as JsonObject | null)?.commits).toEqual([
+      expect.objectContaining({ subject: "inside history" }),
+    ]);
+  });
+
   it("reports non-git workspaces without leaking provider errors", async () => {
     const result = await runtime.execute(request(workspace, "git_status", {}));
 

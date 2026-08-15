@@ -89,7 +89,7 @@ stateDiagram-v2
 
 C04 完成后，`budget.updated` 必须携带 `context.budgetSnapshot`，其 schema 直接复用 C04 版本化 `BudgetSnapshot`，覆盖 token、retry、no-progress、reservation 和 `costUsd: null`；reducer 只把该字段投影到 `SessionView.budget`。旧四维 `context.budget` 仅为同一 AgentEvent v1 的历史可选字段保留解析兼容，不再更新可见预算，也不能用于新 `budget.updated` 事实。
 
-模型/工具 started 与 completed/failed/cancelled 通过 `operationHash` 配对；未提供 hash 时回退到 span ID。`operation.unknown` 必须同时提供操作名称、外部身份和恢复建议，并进入 `UNKNOWN`；`operation.reconciled` 只有 `applied`/`not_applied` 才能回到 `RUNNING`，仍为 `unknown` 时继续阻断完成。
+模型/工具 started 与 completed/failed/cancelled 优先通过精确 span ID 配对；`operationHash` 是批准/版本/参数绑定指纹，不是一次调用的唯一身份。为兼容旧事实，terminal fact 的 span 无法命中时，只允许在 kind、name 与 operationHash 唯一匹配一个 active operation 时回退配对；同 hash 存在多个 active span 时必须 fail closed。`operation.unknown` 必须同时提供操作名称、外部身份和恢复建议，并进入 `UNKNOWN`；`operation.reconciled` 只有 `applied`/`not_applied` 才能回到 `RUNNING`，仍为 `unknown` 时继续阻断完成。
 
 ## 5. 完整性、错误与恢复
 

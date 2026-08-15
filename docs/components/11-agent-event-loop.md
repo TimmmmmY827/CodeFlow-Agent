@@ -204,8 +204,10 @@ idle
 
 `runReadonlySession()` 只装配 C09 已冻结的六个只读工具。首轮强制至少一次 tool call，后续轮次允许模型给出最终答复；每个模型/工具 operation 均先通过 `SqliteExecutionJournal.begin()` 在同一事务预留 C04 预算并写 started fact，完成后以实际 usage/cost 同事务结算并写 terminal fact。模型 Adapter 保持单次业务尝试且禁用 SDK 自动重试。当前切片串行执行并把完整工具 envelope 投影回 transcript，不记录 reasoning 原文。
 
+模型 journal 的每条 finish 路径都必须把持久化失败归一化为 `model_journal_finish_failed`，并在 storage 仍可写时追加 `session.failed`；即使该 terminal fact 也因存储故障无法落盘，Loop 仍只能返回结构化失败并停止新调用，不能让原始异常逃逸后继续执行。
+
 DeepSeek 本地价格表版本为 `deepseek-pricing:2026-08-15`，来源是官方 Models & Pricing 页面；未知模型在网络调用前 fail-closed。provider usage 无法按可信价格核对时，用完整 reservation 保守结算并终止 Session，禁止继续付费调用。
 
 完成判断不是模型权威：循环先写 verification facts，检查 C01 trace integrity、至少一个成功只读工具证据，再由 C10 对当前 codeVersion/diffHash 快照验收，最后才写 `completion.claimed -> completion.verified`。确定性 E2E 覆盖完整 replay；真实 DeepSeek 验收仅在显式 `RUN_DEEPSEEK_LIVE=1` 且环境提供 key 时运行，不进入默认 CI。
 
-仍延期：完整 `advance(trigger)` 幂等恢复、approval/user wait、写工具、UNKNOWN reconciliation、no-progress/retry policy、跨进程恢复与 C06 完整 context manifest。上述能力不得由本切片的内存 transcript 冒充完成。
+仍延期：完整 `advance(trigger)` 幂等恢复、approval/user wait、写工具、UNKNOWN reconciliation、no-progress/retry policy、跨进程恢复与 C06 完整 context manifest。特别是进程在 durable begin 后、finish 前崩溃时，会留下 started fact 与 open reservation；当前切片不会自动释放或重试，后续恢复入口必须通过 `listOpenReservations` 与 operation journal 对账后保守 settle/reconcile。上述能力不得由本切片的内存 transcript 冒充完成。
