@@ -87,7 +87,7 @@ stateDiagram-v2
 
 `SessionView` 至少包含当前状态、目标、计划及 revision/变更原因、活动操作、最近错误及 category、验证结果、预算摘要、待审批事项、最后 sequence 和 `traceComplete`。计划 revision 必须严格递增且携带非空变更原因；完成声明不能绕过 `completion.claimed` 或活动操作检查；验证失败进入 `FAILED`。
 
-当前事件 context 的预算结构只有 steps/toolCalls/duration/cost 四维，属于 C01 已实现基线。C04 目标账本完成时，`budget.updated` 必须升级为 C04 版本化 `BudgetSnapshot` 或其稳定引用，覆盖 token、retry、no-progress、reservation 和 `costUsd: null`；C01 不得另行定义不同含义的预算字段。
+C04 完成后，`budget.updated` 必须携带 `context.budgetSnapshot`，其 schema 直接复用 C04 版本化 `BudgetSnapshot`，覆盖 token、retry、no-progress、reservation 和 `costUsd: null`；reducer 只把该字段投影到 `SessionView.budget`。旧四维 `context.budget` 仅为同一 AgentEvent v1 的历史可选字段保留解析兼容，不再更新可见预算，也不能用于新 `budget.updated` 事实。
 
 模型/工具 started 与 completed/failed/cancelled 通过 `operationHash` 配对；未提供 hash 时回退到 span ID。`operation.unknown` 必须同时提供操作名称、外部身份和恢复建议，并进入 `UNKNOWN`；`operation.reconciled` 只有 `applied`/`not_applied` 才能回到 `RUNNING`，仍为 `unknown` 时继续阻断完成。
 

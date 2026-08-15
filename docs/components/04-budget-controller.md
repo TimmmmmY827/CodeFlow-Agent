@@ -1,10 +1,11 @@
 # C04 BudgetController
 
-- 状态：四维静态判断已实现，消费与预留未接线
+- 状态：C04 核心已实现；八维策略、版本化快照、SQLite 可恢复账本、原子预留/结算/释放、重试/无进展判定和单调计时已交付，C08/C11/C13 组装接线按各自组件推进
 - 目标阶段：D3–D5
-- 代码位置：`src/policy/budget-controller.ts`
-- 硬依赖：[C00 共享契约](00-shared-contracts.md)
-- 下游消费者：C11、C13、C15
+- 代码位置：`src/policy/budget-contracts.ts`、`src/policy/budget-controller.ts`、`src/storage/sqlite/sqlite-budget-ledger.ts`
+- 测试位置：`tests/budget-controller.test.ts`、`tests/sqlite-budget-ledger.test.ts`、`tests/state-reducer-contract.test.ts`
+- 硬依赖：核心策略依赖 [C00 共享契约](00-shared-contracts.md)；SQLite ledger adapter 依赖 [C02 存储](02-storage-artifacts.md)
+- 下游消费者：C01 预算投影、C08、C11、C12、C13、C15
 
 ## 1. 目标
 
@@ -26,7 +27,7 @@
 
 ## 3. 预算维度
 
-当前 `BudgetLimits`/`BudgetUsage` 只实现 steps、toolCalls、durationMs、costUsd 四维快照和静态 `evaluate`。下列八维 limits 是目标契约（规划中），token、重试、无进展、预留/结算和事件恢复尚未实现：
+预算契约主版本为 `BUDGET_SCHEMA_VERSION = 1`。limits 覆盖八个硬边界；用量把活动时间与等待时间分开，并显式携带费用可信度：
 
 ```ts
 interface BudgetLimits {
@@ -57,9 +58,11 @@ interface BudgetSnapshot {
   schemaVersion: number;
   sessionId: StableId;
   usage: BudgetUsage;
-  reserved: Partial<BudgetUsage>;
+  reserved: BudgetUsage;
   limits: BudgetLimits;
   pricingVersion: string | null;
+  countWaitingTime: boolean;
+  softLimitRatio: number;
   updatedAt: UtcTimestamp;
   lastLedgerSequence: number;
 }
@@ -71,14 +74,25 @@ interface BudgetLedgerEntry {
   operationId: StableId;
   idempotencyKey: string;
   kind: "reserve" | "commit" | "release" | "adjust";
-  delta: Partial<BudgetUsage>;
+  ledgerSequence: number;
+  reservationId: StableId | null;
+  delta: BudgetDelta;
+  usageBasis: "estimated" | "actual" | "conservative" | "not_applicable";
+  admission: "allow" | "warn" | "recorded";
+  warningDimensions: BudgetDimension[];
+  reconciliationRequired: boolean;
+  evidence: RetryEvidence | NoProgressEvidence | null;
   createdAt: UtcTimestamp;
 }
 ```
 
 MVP 默认单任务最长 20 分钟、已验收任务平均不超过 1 美元；实现默认值必须由 config 提供，不能散落在循环中。
 
-`BudgetSnapshot` 是 C04 的唯一预算投影契约；C01 `budget.updated` context、C13 和 C15 必须使用同一结构或稳定引用，不能维护另一套四维含义。当前 C01/代码中的四维数值结构是过渡基线，C04 完成前必须扩展；未知费用始终是 `null + costStatus`，不能写成 0。
+`BudgetSnapshot` 是 C04 的唯一预算投影契约；C01 `budget.updated` 的 `context.budgetSnapshot`、C13 和 C15 必须使用同一结构或稳定引用，不能维护另一套四维含义。C01 的旧 `context.budget` 仅为已持久化 v1 事件保留解析兼容，不再驱动 `budget.updated` 或 `SessionView`。未知费用始终是 `null + costStatus = unknown`，不能写成 0；partial 可保存已知小计但不能冒充完整费用。
+
+`BudgetLedger.initialize` 把 policy 与 pricingVersion 完整绑定到 Session；同 Session 不允许用不同参数再次初始化。`reserve/commit/release/adjust` 均由调用方提供 entry ID、稳定 operation ID 和幂等键。相同键与相同内容返回首次持久化的 entry 及当时 snapshot；相同键不同内容返回 `budget_idempotency_conflict`。commit/release 必须引用仍 open 且属于同一 Session/operation 的 reservation。
+
+reserve 到达软阈值时仍提交，但 entry 固化 `admission = warn` 与 `warningDimensions`；到达现有硬限或请求会超过硬限时不写 entry 并返回 `budget_hard_limit`。commit/adjust 记录已经发生的真实或保守 usage，即使它使快照超限也不能丢弃事实，后续 reserve 会被硬门阻止。
 
 ## 4. 功能需求
 
@@ -100,6 +114,8 @@ MVP 默认单任务最长 20 分钟、已验收任务平均不超过 1 美元；
 - 预留成功但操作未开始时可释放；操作开始后由完成/失败结算。
 - 预算状态从事件或 usage ledger 恢复，不能只存在内存计数器。
 - C08 工具开始边界中的 reservation 与批准消费、operation 状态、`tool.started` 同事务；模型调用 reservation 则与 `model.started` 同事务。
+- `SqliteBudgetLedger` 的普通异步方法自行使用 `BEGIN IMMEDIATE`；`reserveWithinTransaction/commitWithinTransaction/releaseWithinTransaction/adjustWithinTransaction` 只加入调用方已经打开的事务，事务体不跨 `await`。C08/C11 journal 必须使用后一组同步原语。
+- v3 migration 在 `budget_accounts` 保存 policy/watermark，在 `usage_entries` 保存 canonical ledger fact、hash、索引列和首次结果快照；当前快照总是从 ledger 重放并核验连续 sequence 与 account watermark，不信任内存计数器。
 
 ## 6. 错误与恢复
 
@@ -127,10 +143,17 @@ MVP 默认单任务最长 20 分钟、已验收任务平均不超过 1 美元；
 - `BUDGET-AC-006`：未知、部分和已知费用可确定重放，任何报告都不会把 unknown 聚合为 0。
 - `BUDGET-AC-007`：reserve/commit/release 重放不会重复计费，幂等键冲突会显式失败。
 
+已交付证据：
+
+- `budget-controller.test.ts` 覆盖八维软/硬门、unknown 费用、UNKNOWN 禁止自动重试、相同失败的首末证据与单调活动/等待计时。
+- `sqlite-budget-ledger.test.ts` 覆盖 policy 初始化冲突、预留/实际结算、缺失 usage 保守结算、未开始释放、跨连接竞争、重启重放、篡改拒绝、加入上游事务及整体回滚。
+- `state-reducer-contract.test.ts` 用同一 `BudgetSnapshot` 重放 10,000 个 `budget.updated`，证明批量与增量投影一致。
+- `BUDGET-AC-005` 的实时 UI 延迟属于 C13 集成验收；C04 已提供持久 snapshot/event payload 契约，不以空 CLI 实现提前宣称完成。
+
 ## 9. 实现任务建议
 
-1. 扩展 limits/usage/reservation 数据模型。
-2. 实现 reserve/commit/release 原子 API。
-3. 接 ModelAdapter usage 和 ToolRuntime lifecycle。
-4. 实现 retry/no-progress tracker。
-5. 接 EventStore/CLI，并做并发与崩溃测试。
+1. C08 用 transactional API 接工具批准/started/预算的同事务开始与结算。
+2. C11 用 transactional API 接模型 started/usage/重试与无进展证据。
+3. C12 从版本化 config 提供 policy/pricingVersion，禁止继续使用散落默认值。
+4. C13 直接渲染 C01 `SessionView.budget`，并完成 1 秒延迟验收。
+5. C15 用 `BudgetSnapshot` 判断费用 known/partial/unknown 与发布门。

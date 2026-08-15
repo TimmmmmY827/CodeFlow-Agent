@@ -18,6 +18,7 @@ import {
 import { isJsonValue, type JsonObject } from "../shared/json.js";
 import type { Result } from "../shared/result.js";
 import { parseVersionedSchema } from "../shared/versioned-schema.js";
+import { budgetSnapshotSchema } from "../policy/budget-contracts.js";
 
 export const AGENT_EVENT_SCHEMA_VERSION = 1;
 
@@ -90,6 +91,9 @@ export const eventContextSchema = z
       })
       .nullable()
       .default(null),
+    // Additive v1 field: optional preserves canonical round-trip for events
+    // persisted before C04 introduced the versioned snapshot.
+    budgetSnapshot: budgetSnapshotSchema.nullable().optional(),
   })
   .superRefine((context, refinement) => {
     if (context.diffHash !== null && context.codeVersion === null) {
@@ -161,6 +165,7 @@ export interface CreateEventContextInput {
   readonly error?: StructuredError | null;
   readonly sideEffectStatus?: AgentEventContext["sideEffectStatus"];
   readonly budget?: AgentEventContext["budget"];
+  readonly budgetSnapshot?: AgentEventContext["budgetSnapshot"];
 }
 
 export function createEventContext(input: CreateEventContextInput): AgentEventContext {
@@ -179,6 +184,7 @@ export function createEventContext(input: CreateEventContextInput): AgentEventCo
     error: input.error ?? null,
     sideEffectStatus: input.sideEffectStatus ?? "none",
     budget: input.budget ?? null,
+    budgetSnapshot: input.budgetSnapshot ?? null,
   });
 }
 

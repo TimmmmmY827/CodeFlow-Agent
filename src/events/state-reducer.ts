@@ -1,10 +1,10 @@
 import type {
   AgentEvent,
-  AgentEventContext,
 } from "./agent-event.js";
 import { parseAgentEvent } from "./agent-event.js";
 import type { JsonObject } from "../shared/json.js";
 import type { StableId, StructuredError } from "../shared/contracts.js";
+import type { BudgetSnapshot } from "../policy/budget-contracts.js";
 
 export type SessionLifecycle =
   | "CREATED"
@@ -19,7 +19,7 @@ export type SessionLifecycle =
   | "FAILED"
   | "UNKNOWN";
 
-export type BudgetSummary = NonNullable<AgentEventContext["budget"]>;
+export type BudgetSummary = BudgetSnapshot;
 
 export interface PendingApproval {
   readonly approvalId: string;
@@ -271,7 +271,7 @@ function initialState(first: AgentEvent): ReducerState {
       lastError: null,
       lastErrorCategory: null,
       verificationPassed: null,
-      budget: first.context.budget ?? null,
+      budget: first.context.budgetSnapshot ?? null,
       pendingApproval: null,
       traceComplete: true,
       lastSequence: first.sequence,
@@ -378,10 +378,10 @@ function applyEvent(state: ReducerState, event: AgentEvent): ReducerState {
       if (["COMPLETION_VERIFIED", "CANCELLED", "FAILED"].includes(current)) {
         throw invalidTransition(current, event.type);
       }
-      if (event.context.budget === null || event.context.budget === undefined) {
-        throw invalidPayload(event.type, "budget.updated requires structured budget context.");
+      if (event.context.budgetSnapshot === null || event.context.budgetSnapshot === undefined) {
+        throw invalidPayload(event.type, "budget.updated requires a versioned C04 budget snapshot.");
       }
-      return withView(state, { ...view, budget: event.context.budget });
+      return withView(state, { ...view, budget: event.context.budgetSnapshot });
     case "session.cancelling":
       if (["COMPLETION_VERIFIED", "CANCELLED", "FAILED"].includes(current)) {
         throw invalidTransition(current, event.type);
@@ -507,7 +507,7 @@ function withContext(view: SessionView, event: AgentEvent): SessionView {
   return {
     ...view,
     lastSequence: event.sequence,
-    budget: event.context.budget ?? view.budget,
+    budget: event.context.budgetSnapshot ?? view.budget,
   };
 }
 

@@ -8,6 +8,7 @@ import {
   checkTraceIntegrity,
   reduceAgentEvents,
 } from "../src/events/state-reducer.js";
+import { BUDGET_SCHEMA_VERSION, type BudgetSnapshot } from "../src/policy/budget-contracts.js";
 
 describe("C01 event/state contracts", () => {
   it("projects plan revisions, budget, and pending approvals", () => {
@@ -28,10 +29,7 @@ describe("C01 event/state contracts", () => {
         type: "budget.updated",
         context: createEventContext({
           workspacePath: ".",
-          budget: {
-            usage: { steps: 1, toolCalls: 0, durationMs: 12, costUsd: 0.01 },
-            limits: { maxSteps: 10, maxToolCalls: 20, maxDurationMs: 60_000, maxCostUsd: 1 },
-          },
+          budgetSnapshot: budgetSnapshot(ids.sessionId, 1, 3),
         }),
       }),
       createAgentEvent({
@@ -183,10 +181,7 @@ describe("C01 event/state contracts", () => {
         type: "budget.updated",
         context: createEventContext({
           workspacePath: ".",
-          budget: {
-            usage: { steps: sequence - 1, toolCalls: 0, durationMs: sequence, costUsd: 0 },
-            limits: { maxSteps: 20_000, maxToolCalls: 20_000, maxDurationMs: 1_000_000, maxCostUsd: 10 },
-          },
+          budgetSnapshot: budgetSnapshot(ids.sessionId, sequence - 1, sequence),
         }),
       }));
     }
@@ -219,4 +214,50 @@ function started(ids: ReturnType<typeof identifiers>, sequence: number) {
     type: "session.started",
     context: createEventContext({ workspacePath: "." }),
   });
+}
+
+function budgetSnapshot(sessionId: string, steps: number, sequence: number): BudgetSnapshot {
+  return {
+    schemaVersion: BUDGET_SCHEMA_VERSION,
+    sessionId,
+    usage: {
+      steps,
+      toolCalls: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      retries: 0,
+      noProgressCycles: 0,
+      activeDurationMs: sequence,
+      waitingDurationMs: 0,
+      costUsd: 0,
+      costStatus: "known",
+    },
+    reserved: {
+      steps: 0,
+      toolCalls: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      retries: 0,
+      noProgressCycles: 0,
+      activeDurationMs: 0,
+      waitingDurationMs: 0,
+      costUsd: 0,
+      costStatus: "known",
+    },
+    limits: {
+      maxSteps: 20_000,
+      maxToolCalls: 20_000,
+      maxDurationMs: 1_000_000,
+      maxInputTokens: 1_000_000,
+      maxOutputTokens: 1_000_000,
+      maxCostUsd: 10,
+      maxRetriesPerOperation: 3,
+      maxNoProgressCycles: 3,
+    },
+    pricingVersion: "pricing:test",
+    countWaitingTime: false,
+    softLimitRatio: 0.8,
+    updatedAt: "2026-08-15T00:00:00.000Z",
+    lastLedgerSequence: sequence,
+  };
 }

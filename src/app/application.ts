@@ -3,6 +3,7 @@ import { CompletionGate } from "../completion/completion-gate.js";
 import { ContextAssembler } from "../context/context-assembler.js";
 import { InMemoryEventStore } from "../events/event-store.js";
 import { BudgetController } from "../policy/budget-controller.js";
+import { DEFAULT_BUDGET_POLICY } from "../policy/budget-contracts.js";
 import { PermissionEngine } from "../policy/permission-engine.js";
 import {
   createCancellationContext,
@@ -44,12 +45,7 @@ export function createApplication(): CodeFlowApplication {
     toolRegistry,
     toolRuntime: new ToolRuntime(toolRegistry, permissionEngine),
     permissionEngine,
-    budgetController: new BudgetController({
-      maxSteps: 80,
-      maxToolCalls: 120,
-      maxDurationMs: 20 * 60 * 1_000,
-      maxCostUsd: 1,
-    }),
+    budgetController: new BudgetController(DEFAULT_BUDGET_POLICY),
     completionGate: new CompletionGate(),
     cancellationContext: (signal, deadlineAt = null) =>
       createCancellationContext(signal, deadlineAt),

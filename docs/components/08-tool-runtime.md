@@ -36,7 +36,7 @@ lookup -> validate input -> canonical operation hash -> cancellation check
  -> emit finished -> return envelope
 ```
 
-当前没有 budget reservation、per-tool timeout、outputSchema 或持久化 event；observer/ArtifactStore 失败后的证据恢复也未完成。C03 已提供完整 OperationBinding、持久审批 repository 和可组合的 SQLite 消费原语，但当前 Runtime 尚未接线，仍使用显式 legacy hash/permission 入口与进程内消费；该入口不得被新调用方采用。
+当前 Runtime 尚未接 budget reservation、per-tool timeout、outputSchema 或持久化 event；observer/ArtifactStore 失败后的证据恢复也未完成。C03 已提供完整 OperationBinding、持久审批 repository 和 SQLite 消费原语，C04 已提供 `SqliteBudgetLedger.reserveWithinTransaction/commitWithinTransaction` 等同步事务原语，但当前 Runtime 尚未组装，仍使用显式 legacy hash/permission 入口与进程内消费；该入口不得被新调用方采用。
 
 ### 3.2 目标流水线（规划中）
 
@@ -126,6 +126,8 @@ interface ToolResultEnvelope {
   error: StructuredError | null;
 }
 ```
+
+journal adapter 必须在自己打开的 SQLite 事务内调用 C03 `consumeWithinTransaction` 和 C04 `reserveWithinTransaction`，随后写 operation 与 `tool.started` 再统一提交；finish/fail 则调用 C04 `commitWithinTransaction`（已开始，即使 usage 缺失也保守结算），只有明确未开始才允许 `releaseWithinTransaction`。这些方法都是同步事务片段，事务体不得跨 `await`。
 
 ### 4.2 目标接口（规划中）
 
