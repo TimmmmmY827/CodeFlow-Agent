@@ -80,6 +80,28 @@ describe("workspace read tools", () => {
     });
   });
 
+  it("falls back to a bounded Node search when ripgrep is unavailable", async () => {
+    const registry = new ToolRegistry();
+    registerWorkspaceReadTools(registry, { searchCommand: "codeflow-definitely-missing-rg" });
+    const fallbackRuntime = new ToolRuntime(registry, new PermissionEngine());
+
+    const result = await fallbackRuntime.execute(request(workspace, "search_text", {
+      query: "ANSWER",
+      path: ".",
+      caseSensitive: false,
+      maxMatches: 10,
+    }));
+
+    expect(result).toMatchObject({
+      status: "completed",
+      output: {
+        backend: "node",
+        truncated: false,
+        matches: [{ path: "src/hello.ts", line: 2, column: 14, text: "export const answer = 42;" }],
+      },
+    });
+  });
+
   it("rejects workspace traversal before reading", async () => {
     const result = await runtime.execute(request(workspace, "read_file", { path: "../outside.txt" }));
 

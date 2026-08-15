@@ -68,11 +68,20 @@ const gitLogInputSchema = z.object({
 });
 
 const IGNORED_DIRECTORIES = new Set([".git", "node_modules", "dist", "artifacts"]);
+const SEARCH_TIMEOUT_MS = 10_000;
+const SEARCH_MAX_FILES = 10_000;
+const SEARCH_MAX_TOTAL_BYTES = 20_000_000;
+const SEARCH_MAX_FILE_BYTES = 2_000_000;
 
-export function createWorkspaceReadTools(): readonly AnyToolDefinition[] {
+export interface WorkspaceReadToolOptions {
+  /** Test seam and deployment override. Missing commands use the bounded Node fallback. */
+  readonly searchCommand?: string;
+}
+
+export function createWorkspaceReadTools(options: WorkspaceReadToolOptions = {}): readonly AnyToolDefinition[] {
   return [
     createListFilesTool(),
-    createSearchTextTool(),
+    createSearchTextTool(options),
     createReadFileTool(),
     createGitStatusTool(),
     createGitDiffTool(),
@@ -80,8 +89,8 @@ export function createWorkspaceReadTools(): readonly AnyToolDefinition[] {
   ];
 }
 
-export function registerWorkspaceReadTools(registry: ToolRegistry): void {
-  for (const tool of createWorkspaceReadTools()) registry.register(tool);
+export function registerWorkspaceReadTools(registry: ToolRegistry, options: WorkspaceReadToolOptions = {}): void {
+  for (const tool of createWorkspaceReadTools(options)) registry.register(tool);
 }
 
 export function createListFilesTool(): ToolDefinition<z.infer<typeof listFilesInputSchema>, JsonObject> {
@@ -125,16 +134,22 @@ export function createListFilesTool(): ToolDefinition<z.infer<typeof listFilesIn
   });
 }
 
-export function createSearchTextTool(): ToolDefinition<z.infer<typeof searchTextInputSchema>, JsonObject> {
+export function createSearchTextTool(options: WorkspaceReadToolOptions = {}): ToolDefinition<z.infer<typeof searchTextInputSchema>, JsonObject> {
   return readOnlyTool("search_text", "Search bounded UTF-8 workspace text with ripgrep.", searchTextInputSchema, async (input, context) => {
     const boundary = await resolveWorkspacePath(context.workspace, input.path, true);
     const args = ["--line-number", "--column", "--no-heading", "--color", "never", "--glob", "!.git/**", "--glob", "!node_modules/**", "--glob", "!dist/**", "--glob", "!artifacts/**"];
     if (!input.regex) args.push("--fixed-strings");
     if (!input.caseSensitive) args.push("--ignore-case");
     args.push("--", input.query, normalizeRelative(boundary.root, boundary.candidate) || ".");
-    const result = await runCommand("rg", args, boundary.root, context, 512_000, [0, 1]);
-    const matches = result.stdout.split(/\r?\n/u).filter(Boolean).slice(0, input.maxMatches).map(parseSearchMatch);
-    return { matches, truncated: result.truncated || result.stdout.split(/\r?\n/u).filter(Boolean).length > matches.length };
+    try {
+      const result = await runCommand(options.searchCommand ?? "rg", args, boundary.root, context, 512_000, [0, 1]);
+      const lines = result.stdout.split(/\r?\n/u).filter(Boolean);
+      const matches = lines.slice(0, input.maxMatches).map(parseSearchMatch);
+      return { matches, truncated: result.truncated || lines.length > matches.length, backend: "ripgrep" };
+    } catch (error: unknown) {
+      if (!(error instanceof ToolExecutionError) || error.details.category !== "command_unavailable") throw error;
+      return await searchTextWithoutRipgrep(boundary, input, context);
+    }
   });
 }
 
@@ -332,7 +347,7 @@ async function runCommand(
     child.stderr.on("data", (chunk: Buffer) => {
       if (errors.reduce((total, item) => total + item.byteLength, 0) < 16_384) errors.push(chunk);
     });
-    child.on("error", (error) => finish(() => rejectPromise(toolError(failureCategory, error.message, true))));
+    child.on("error", (error) => finish(() => rejectPromise(toolError("command_unavailable", `${command} is unavailable: ${error.message}`, false))));
     child.on("close", (code) => finish(() => {
       if (context.signal.aborted || (context.deadlineAt && Date.now() >= Date.parse(context.deadlineAt))) {
         rejectPromise(toolError("cancelled", "The tool operation was cancelled."));
@@ -354,6 +369,103 @@ async function runCommand(
       callback();
     }
   });
+}
+
+async function searchTextWithoutRipgrep(
+  boundary: { root: string; candidate: string },
+  input: z.infer<typeof searchTextInputSchema>,
+  context: ToolExecutionContext,
+): Promise<JsonObject> {
+  const startedAt = Date.now();
+  const matches: JsonObject[] = [];
+  let fileCount = 0;
+  let totalBytes = 0;
+  let truncated = false;
+  const pattern = createSearchPattern(input.query, input.regex, input.caseSensitive);
+
+  const inspectFile = async (absolute: string): Promise<void> => {
+    assertSearchActive(context, startedAt);
+    if (matches.length >= input.maxMatches || fileCount >= SEARCH_MAX_FILES || totalBytes >= SEARCH_MAX_TOTAL_BYTES) {
+      truncated = true;
+      return;
+    }
+    const metadata = await lstat(absolute);
+    if (!metadata.isFile() || metadata.size > SEARCH_MAX_FILE_BYTES) return;
+    fileCount += 1;
+    totalBytes += metadata.size;
+    if (totalBytes > SEARCH_MAX_TOTAL_BYTES) {
+      truncated = true;
+      return;
+    }
+    const bytes = await readFile(absolute);
+    if (bytes.includes(0)) return;
+    let text: string;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      return;
+    }
+    const lines = text.split(/\r?\n/u);
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+      assertSearchActive(context, startedAt);
+      const line = lines[lineIndex] ?? "";
+      pattern.lastIndex = 0;
+      for (;;) {
+        const match = pattern.exec(line);
+        if (!match) break;
+        matches.push({
+          path: normalizeRelative(boundary.root, absolute),
+          line: lineIndex + 1,
+          column: match.index + 1,
+          text: line,
+        });
+        if (matches.length >= input.maxMatches) {
+          truncated = true;
+          return;
+        }
+        if (match[0] === "") pattern.lastIndex += 1;
+      }
+    }
+  };
+
+  const walk = async (absolute: string): Promise<void> => {
+    assertSearchActive(context, startedAt);
+    const metadata = await lstat(absolute);
+    if (metadata.isSymbolicLink()) return;
+    if (metadata.isFile()) {
+      await inspectFile(absolute);
+      return;
+    }
+    if (!metadata.isDirectory()) return;
+    const children = await readdir(absolute, { withFileTypes: true });
+    children.sort((left, right) => left.name.localeCompare(right.name, "en"));
+    for (const child of children) {
+      if (truncated || IGNORED_DIRECTORIES.has(child.name) || child.isSymbolicLink()) continue;
+      await walk(resolve(absolute, child.name));
+    }
+  };
+
+  await walk(boundary.candidate);
+  return { matches, truncated, backend: "node" };
+}
+
+function createSearchPattern(query: string, regex: boolean, caseSensitive: boolean): RegExp {
+  const source = regex ? query : query.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  try {
+    return new RegExp(source, caseSensitive ? "gu" : "giu");
+  } catch (error: unknown) {
+    throw toolError(
+      "invalid_search_pattern",
+      error instanceof Error ? error.message : "The search pattern is invalid.",
+    );
+  }
+}
+
+function assertSearchActive(context: ToolExecutionContext, startedAt: number): void {
+  assertActive(context);
+  if (Date.now() - startedAt >= SEARCH_TIMEOUT_MS) {
+    throw toolError("command_timeout", "The fallback search exceeded the 10 second execution limit.", true);
+  }
 }
 
 function assertActive(context: ToolExecutionContext): void {

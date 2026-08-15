@@ -198,4 +198,5 @@ export {
   createWorkspaceReadTools,
   registerWorkspaceReadTools,
 } from "./tools/builtin/workspace-read-tools.js";
+export type { WorkspaceReadToolOptions } from "./tools/builtin/workspace-read-tools.js";
 export { exportSanitizedTrace } from "./trace/trace-exporter.js";
