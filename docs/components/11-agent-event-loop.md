@@ -103,6 +103,8 @@ interface DurableModelCallJournal {
 
 `DurableModelCallJournal.begin` 在一个 C02 事务中预留 C04 预算并追加 `model.started`，返回的 lease 包含 C05 所需 run/step/span/modelCall/attempt 身份。只有 begin 持久化确认后才允许发送模型网络请求；finish/fail 结算 usage 并追加唯一 `model.completed`。
 
+实现时 begin/finish 必须由 C02 `runImmediateTransaction()` 承载并使用 C04 `reserveWithinTransaction/commitWithinTransaction`，而不是先调用独立异步 ledger 再写事件。provider 缺失 usage 时，先按版本化本地 pricing table 计算费用；仍无法计价则 commit `costStatus = unknown` 并暂停新付费调用。完全缺失 usage 时 commit 传 `actual = null`，由 ledger 以完整 reservation 生成 `usageBasis = conservative` 和 `reconciliationRequired = true`；不得 release 已经发送的模型调用。恢复时先调用 `listOpenReservations`，用 started/operation journal 判定 settle/release，不能因进程内 lease 丢失让预算永久悬挂。每个重试使用同一 operationId、递增 attempt、独立幂等键，并把 operationHash/副作用状态写入 retry evidence；`UNKNOWN` 直接阻断自动重试。
+
 ## 5. 功能需求
 
 - `LOOP-FR-001`：每次模型周期分配 step ID；模型、tool call 和结果通过 span/call ID 关联。
@@ -142,7 +144,7 @@ idle
 | 来源 | 分类 | Loop 行为 |
 | --- | --- | --- |
 | Context | overflow | checkpoint 后重试一次 |
-| Model | retryable | 预算内最多 2 次 |
+| Model | retryable | 模型策略默认最多 2 次，且不得超过 C04 `maxRetriesPerOperation` |
 | Model | invalid tool call | 写观察并要求模型重规划 |
 | Runtime | approval_required | WAITING_APPROVAL |
 | Runtime | denied | 写观察，不自动重复请求 |

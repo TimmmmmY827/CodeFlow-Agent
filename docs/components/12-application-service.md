@@ -108,6 +108,8 @@ interface ConfigUpdateResult {
 }
 ```
 
+`budget` 只包含用户可控的八维硬 limits；`softLimitRatio`、`countWaitingTime` 与 `pricingVersion` 来自版本化 `AppConfig`/定价目录。C12 创建 Session 时必须初始化同一个 C04 durable budget account，并把完整 policy hash 纳入行为配置版本；不得继续组装旧四维 `BudgetController` 或在 Loop 中散落默认值。
+
 这些 DTO 的所有者是 C12；`SessionFilter`、`SessionSummary` 和 Workspace/Session 记录从 C02 导入，不能重定义。SessionHandle 不暴露 Loop、repository 或 Provider。`requestId/commandId` 是幂等键：重复提交相同内容返回旧 receipt，不同内容冲突则拒绝。
 
 `streamEvents(afterSequence)` 必须由持久 EventStore 提供 replay-then-tail 语义：先建立受 sequence 保护的订阅游标，再补齐历史，最后无缝切换实时事件。慢消费者使用持久 sequence 重连；内存缓冲达到上限时断开并返回最后成功 sequence，不得阻塞事件写入。

@@ -181,18 +181,16 @@ INSERT INTO approvals(
   }
 
   /**
-   * C08 can call this only after opening its own SQLite transaction. The first
-   * statement acquires/upgrades to the SQLite write lock before approval state
-   * is read, so a DEFERRED transaction either becomes serialized or fails
-   * closed instead of consuming from a stale snapshot.
+   * C08 can call this only inside SqliteStorageDatabase.runImmediateTransaction,
+   * which acquires the SQLite write lock before any approval state is read.
    */
   consumeWithinTransaction(input: ConsumeApprovalInput): ApprovalRecord {
-    if (!this.storage.database.isTransaction) {
+    if (!this.storage.isImmediateTransactionActive) {
       throw approvalError(
         "approval_transaction_required",
-        "Approval consumption requires an active execution transaction.",
+        "Approval consumption requires an active BEGIN IMMEDIATE execution transaction.",
         false,
-        "Open the C08 execution transaction before consuming the approval.",
+        "Use SqliteStorageDatabase.runImmediateTransaction before consuming the approval.",
       );
     }
     const checked = validateConsume(input);

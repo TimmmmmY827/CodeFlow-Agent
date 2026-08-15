@@ -90,14 +90,22 @@ describe("SqliteApprovalRepository", () => {
     fixture.clock.now = APPROVED_AT;
     await repository.resolve({ approvalId: APPROVAL_ID, decision: "approved", reason: null });
 
-    // The participant upgrades a DEFERRED transaction to a write transaction
-    // before reading approval state, then remains part of the caller rollback.
     storage.database.exec("BEGIN");
-    repository.consumeWithinTransaction({
+    expect(() => repository.consumeWithinTransaction({
       approvalId: APPROVAL_ID,
       operationHash: createOperationHash(binding()),
-    });
+    })).toThrowError(expect.objectContaining({
+      details: expect.objectContaining({ category: "approval_transaction_required" }),
+    }));
     storage.database.exec("ROLLBACK");
+
+    expect(() => storage.runImmediateTransaction(() => {
+      repository.consumeWithinTransaction({
+        approvalId: APPROVAL_ID,
+        operationHash: createOperationHash(binding()),
+      });
+      throw new Error("journal fault after approval consumption");
+    })).toThrow("journal fault");
 
     await expect(repository.get(APPROVAL_ID)).resolves.toMatchObject({ state: "approved" });
     expect(() => repository.consumeWithinTransaction({

@@ -40,4 +40,18 @@ describe("AgentEvent", () => {
       sideEffectStatus: "none",
     });
   });
+
+  it("keeps pre-C04 v1 events canonical when budgetSnapshot is absent", () => {
+    const event = createAgentEvent({
+      sessionId: randomUUID(),
+      taskId: randomUUID(),
+      sequence: 0,
+      type: "session.created",
+      context: createEventContext({ workspacePath: "C:/workspace" }),
+    });
+    const { budgetSnapshot: _removed, ...legacyContext } = event.context;
+    const parsed = agentEventSchema.parse({ ...event, context: legacyContext });
+
+    expect(Object.hasOwn(parsed.context, "budgetSnapshot")).toBe(false);
+  });
 });

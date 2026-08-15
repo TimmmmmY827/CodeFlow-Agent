@@ -54,7 +54,44 @@ export type {
   TraceIntegrityReport,
 } from "./events/state-reducer.js";
 export { DeepSeekResponsesAdapter } from "./model/deepseek-responses-adapter.js";
-export { BudgetController } from "./policy/budget-controller.js";
+export {
+  BudgetController,
+  BudgetTimer,
+  detectNoProgress,
+} from "./policy/budget-controller.js";
+export {
+  BUDGET_SCHEMA_VERSION,
+  BudgetError,
+  DEFAULT_BUDGET_POLICY,
+  ZERO_BUDGET_USAGE,
+  budgetDeltaSchema,
+  budgetCostReconciliationSchema,
+  budgetEvidenceSchema,
+  budgetLedgerEntrySchema,
+  budgetLimitsSchema,
+  budgetPolicySchema,
+  budgetSnapshotSchema,
+  budgetUsageSchema,
+  costStatusSchema,
+} from "./policy/budget-contracts.js";
+export type {
+  AdjustBudgetInput,
+  BudgetDelta,
+  BudgetCostReconciliation,
+  BudgetEvidence,
+  BudgetLedger,
+  BudgetLedgerEntry,
+  BudgetLimits,
+  BudgetMutationResult,
+  BudgetPolicy,
+  BudgetSnapshot,
+  BudgetUsage,
+  CommitBudgetInput,
+  InitializeBudgetInput,
+  ReleaseBudgetInput,
+  ReserveBudgetInput,
+  TransactionalBudgetLedger,
+} from "./policy/budget-contracts.js";
 export { PermissionEngine } from "./policy/permission-engine.js";
 export type {
   LegacyApprovalToken,
@@ -76,6 +113,7 @@ export {
   PERMISSION_SCHEMA_VERSION,
   taskAuthorizationSchema,
 } from "./policy/permission-contracts.js";
+export { SqliteBudgetLedger } from "./storage/sqlite/sqlite-budget-ledger.js";
 export type {
   ApprovalRecord,
   ApprovalRepository,

@@ -17,6 +17,7 @@ export class SqliteStorageDatabase implements Disposable {
   readonly database: DatabaseSync;
   readonly clock: Clock;
   readonly databasePath: string | null;
+  #immediateTransactionActive = false;
 
   constructor(databasePath: string, options: OpenSqliteStorageOptions = {}) {
     const resolvedPath = databasePath === ":memory:" ? databasePath : path.resolve(databasePath);
@@ -61,6 +62,47 @@ export class SqliteStorageDatabase implements Disposable {
 
   close(): void {
     if (this.database.isOpen) this.database.close();
+  }
+
+  get isImmediateTransactionActive(): boolean {
+    return this.#immediateTransactionActive && this.database.isTransaction;
+  }
+
+  /**
+   * Synchronous transaction host for C03/C04/C08/C11 atomic boundaries.
+   * The callback must not return a Promise: DatabaseSync transactions must
+   * never remain open across an event-loop turn.
+   */
+  runImmediateTransaction<T>(operation: () => T): T {
+    if (this.database.isTransaction || this.#immediateTransactionActive) {
+      throw storageError(
+        "storage_transaction_nested",
+        "A storage transaction is already active on this connection.",
+        false,
+        "Join the existing journal boundary instead of nesting a transaction.",
+      );
+    }
+    try {
+      this.database.exec("BEGIN IMMEDIATE");
+      this.#immediateTransactionActive = true;
+      const result = operation();
+      if (isThenable(result)) {
+        throw storageError(
+          "storage_async_transaction_forbidden",
+          "A DatabaseSync transaction callback returned a Promise.",
+          false,
+          "Keep the journal transaction synchronous and perform awaited work after commit.",
+        );
+      }
+      this.database.exec("COMMIT");
+      return result;
+    } catch (error: unknown) {
+      if (this.database.isTransaction) this.database.exec("ROLLBACK");
+      if (isSqliteError(error)) throw translateStorageError(error);
+      throw error;
+    } finally {
+      this.#immediateTransactionActive = false;
+    }
   }
 
   /**
@@ -169,4 +211,14 @@ function isNonnegativeInteger(value: unknown): value is number {
 
 function isPhysicalPurgePending(error: unknown): boolean {
   return error instanceof StorageError && error.details.category === "physical_purge_pending";
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return typeof value === "object" && value !== null && "then" in value &&
+    typeof (value as { readonly then?: unknown }).then === "function";
+}
+
+function isSqliteError(error: unknown): boolean {
+  return error instanceof Error && "code" in error &&
+    (error as Error & { readonly code?: unknown }).code === "ERR_SQLITE_ERROR";
 }

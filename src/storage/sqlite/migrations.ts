@@ -4,7 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type { Clock } from "../../shared/contracts.js";
 import { StorageError, translateStorageError } from "./sqlite-errors.js";
 
-export const STORAGE_SCHEMA_VERSION = 2;
+export const STORAGE_SCHEMA_VERSION = 3;
 
 export interface MigrationHooks {
   /** Test-only observation point reached after the migration write lock is held. */
@@ -178,6 +178,52 @@ ALTER TABLE approvals ADD COLUMN record_json TEXT;
 
 CREATE INDEX idx_approvals_session_state ON approvals(session_id, decision);
 CREATE INDEX idx_approvals_operation_hash ON approvals(operation_hash);
+`,
+  },
+  {
+    version: 3,
+    name: "durable_budget_ledger",
+    sql: `
+CREATE TABLE budget_accounts (
+  session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+  schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+  policy_json TEXT NOT NULL,
+  policy_hash TEXT NOT NULL CHECK (length(policy_hash) = 71 AND policy_hash LIKE 'sha256:%'),
+  pricing_version TEXT,
+  last_ledger_sequence INTEGER NOT NULL DEFAULT -1 CHECK (last_ledger_sequence >= -1),
+  created_at TEXT NOT NULL CHECK (length(created_at) = 24 AND created_at GLOB '????-??-??T??:??:??.???Z'),
+  updated_at TEXT NOT NULL CHECK (length(updated_at) = 24 AND updated_at GLOB '????-??-??T??:??:??.???Z')
+);
+
+ALTER TABLE usage_entries ADD COLUMN operation_id TEXT;
+ALTER TABLE usage_entries ADD COLUMN idempotency_key TEXT;
+ALTER TABLE usage_entries ADD COLUMN entry_kind TEXT CHECK (
+  entry_kind IS NULL OR entry_kind IN ('reserve', 'commit', 'release', 'adjust')
+);
+ALTER TABLE usage_entries ADD COLUMN ledger_sequence INTEGER CHECK (
+  ledger_sequence IS NULL OR ledger_sequence >= 0
+);
+ALTER TABLE usage_entries ADD COLUMN reservation_id TEXT;
+ALTER TABLE usage_entries ADD COLUMN request_hash TEXT CHECK (
+  request_hash IS NULL OR (length(request_hash) = 71 AND request_hash LIKE 'sha256:%')
+);
+ALTER TABLE usage_entries ADD COLUMN entry_hash TEXT CHECK (
+  entry_hash IS NULL OR (length(entry_hash) = 71 AND entry_hash LIKE 'sha256:%')
+);
+ALTER TABLE usage_entries ADD COLUMN result_snapshot_json TEXT;
+ALTER TABLE usage_entries ADD COLUMN result_snapshot_hash TEXT CHECK (
+  result_snapshot_hash IS NULL OR (length(result_snapshot_hash) = 71 AND result_snapshot_hash LIKE 'sha256:%')
+);
+
+CREATE UNIQUE INDEX idx_usage_budget_idempotency
+ON usage_entries(session_id, idempotency_key)
+WHERE idempotency_key IS NOT NULL;
+CREATE UNIQUE INDEX idx_usage_budget_sequence
+ON usage_entries(session_id, ledger_sequence)
+WHERE ledger_sequence IS NOT NULL;
+CREATE INDEX idx_usage_budget_reservation
+ON usage_entries(session_id, reservation_id)
+WHERE reservation_id IS NOT NULL;
 `,
   },
 ];

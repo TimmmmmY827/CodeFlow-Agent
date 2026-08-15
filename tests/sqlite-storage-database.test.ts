@@ -50,6 +50,11 @@ describe("SqliteStorageDatabase migrations", () => {
         name: "durable_approval_state",
         applied_at: FIXED_TIMESTAMP,
       },
+      {
+        version: 3,
+        name: "durable_budget_ledger",
+        applied_at: FIXED_TIMESTAMP,
+      },
     ]);
 
     first.close();
@@ -61,7 +66,7 @@ describe("SqliteStorageDatabase migrations", () => {
     });
 
     expect(reopened.database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual(
-      { count: 2 },
+      { count: 3 },
     );
     expect(reopened.database.prepare("SELECT applied_at FROM schema_migrations").get()).toEqual({
       applied_at: FIXED_TIMESTAMP,
@@ -99,6 +104,13 @@ CREATE TABLE approvals(
   decision TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   decided_at TEXT NOT NULL
+);
+CREATE TABLE usage_entries(
+  usage_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+  schema_version INTEGER NOT NULL,
+  entry_json TEXT NOT NULL,
+  occurred_at TEXT NOT NULL
 );`);
     legacy
       .prepare("INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (1, ?, ?, ?)")
@@ -120,8 +132,8 @@ INSERT INTO approvals(
 
     migrateStorage(legacy, clock);
 
-    expect(legacy.prepare("PRAGMA user_version").get()).toEqual({ user_version: 2 });
-    expect(legacy.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 2 });
+    expect(legacy.prepare("PRAGMA user_version").get()).toEqual({ user_version: 3 });
+    expect(legacy.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 3 });
     expect(legacy.prepare("SELECT record_json, record_hash FROM approvals").get()).toEqual({
       record_json: null,
       record_hash: null,
@@ -154,17 +166,17 @@ INSERT INTO approvals(
       .prepare(
         "INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (?, ?, ?, ?)",
       )
-      .run(3, "future_storage", "sha256:future", FIXED_TIMESTAMP);
-    newer.exec("PRAGMA user_version = 3");
+      .run(4, "future_storage", "sha256:future", FIXED_TIMESTAMP);
+    newer.exec("PRAGMA user_version = 4");
     newer.close();
 
     expectOpeningToFail(databasePath, "newer than this application");
 
     using inspection = new DatabaseSync(databasePath);
     expect(inspection.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({
-      count: 3,
+      count: 4,
     });
-    expect(inspection.prepare("PRAGMA user_version").get()).toEqual({ user_version: 3 });
+    expect(inspection.prepare("PRAGMA user_version").get()).toEqual({ user_version: 4 });
   });
 
   it("fails closed when PRAGMA user_version disagrees with migration history", () => {
@@ -253,6 +265,18 @@ INSERT INTO approvals(
     })).toThrowError(RangeError);
   });
 
+  it("rejects async and nested callbacks in the immediate transaction host", async () => {
+    using storage = new SqliteStorageDatabase(":memory:", { clock });
+    expect(() => storage.runImmediateTransaction(async () => Promise.resolve(1))).toThrowError(
+      expect.objectContaining({ details: expect.objectContaining({ category: "storage_async_transaction_forbidden" }) }),
+    );
+    expect(storage.database.isTransaction).toBe(false);
+    expect(() => storage.runImmediateTransaction(() => storage.runImmediateTransaction(() => 1))).toThrowError(
+      expect.objectContaining({ details: expect.objectContaining({ category: "storage_transaction_nested" }) }),
+    );
+    expect(storage.database.isTransaction).toBe(false);
+  });
+
   it("rolls back every statement and migration record when a migration fails", () => {
     using database = new DatabaseSync(":memory:");
     let createCount = 0;
@@ -300,9 +324,9 @@ INSERT INTO approvals(
     // acquires the lock and observes version 1 rather than a stale empty list.
     expect(() => migrateStorage(second, clock)).not.toThrow();
     expect(second.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({
-      count: 2,
+      count: 3,
     });
-    expect(second.prepare("PRAGMA user_version").get()).toEqual({ user_version: 2 });
+    expect(second.prepare("PRAGMA user_version").get()).toEqual({ user_version: 3 });
   });
 
   it("fails a historical D1 schema with an explicit export-and-reinitialize recovery", () => {
