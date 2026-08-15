@@ -100,7 +100,7 @@ export async function startReadonlySession(
   const goal = request.goal.trim();
   if (!goal) throw new TypeError("goal must not be empty.");
   const workspace = await requireWorkspace(request.workspace);
-  const dataDirectory = path.resolve(dependencies.dataDirectory);
+  const dataDirectory = await canonicalizePotentialPath(dependencies.dataDirectory);
   assertPrivateDataDirectory(workspace, dataDirectory);
   const clock = dependencies.clock ?? systemClock;
   const registry = new ToolRegistry();
@@ -250,6 +250,33 @@ async function requireWorkspace(value: string): Promise<string> {
   });
   if (!(await stat(resolved)).isDirectory()) throw new TypeError("workspace must be a directory.");
   return path.normalize(resolved);
+}
+
+async function canonicalizePotentialPath(value: string): Promise<string> {
+  let candidate = path.resolve(value);
+  const missingSegments: string[] = [];
+
+  for (;;) {
+    try {
+      const canonicalAncestor = await realpath(candidate);
+      return path.resolve(canonicalAncestor, ...missingSegments);
+    } catch (error) {
+      if (!isMissingPathError(error)) {
+        throw new TypeError("data directory must have an accessible parent directory.", { cause: error });
+      }
+    }
+
+    const parent = path.dirname(candidate);
+    if (parent === candidate) {
+      throw new TypeError("data directory must have an accessible parent directory.");
+    }
+    missingSegments.unshift(path.basename(candidate));
+    candidate = parent;
+  }
+}
+
+function isMissingPathError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
 }
 
 function assertPrivateDataDirectory(workspace: string, dataDirectory: string): void {

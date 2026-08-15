@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -90,6 +90,17 @@ describe("production-shaped read-only Session runner", () => {
     await expect(startReadonlySession(
       { goal: "Inspect", workspace: fixture.workspace, signal: new AbortController().signal },
       { dataDirectory: path.join(fixture.workspace, "private-data"), modelAdapter: new ScriptedModelAdapter(), clock },
+    )).rejects.toThrow("must be nested under .codeflow");
+  });
+
+  it("rejects an in-workspace data directory reached through a filesystem alias", async () => {
+    const fixture = await createFixture();
+    const workspaceAlias = path.join(path.dirname(fixture.workspace), "workspace-alias");
+    await symlink(fixture.workspace, workspaceAlias, process.platform === "win32" ? "junction" : "dir");
+
+    await expect(startReadonlySession(
+      { goal: "Inspect", workspace: fixture.workspace, signal: new AbortController().signal },
+      { dataDirectory: path.join(workspaceAlias, "private-data"), modelAdapter: new ScriptedModelAdapter(), clock },
     )).rejects.toThrow("must be nested under .codeflow");
   });
 });
