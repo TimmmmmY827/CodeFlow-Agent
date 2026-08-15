@@ -1,6 +1,6 @@
 # C12 Application Service 与 Composition Root
 
-- 状态：基础对象组装存在，生产 Provider 和用例服务未接
+- 状态：Issue #7 单次只读生产 runner + replay-then-tail event source；完整用例 facade 未接
 - 目标阶段：D3–D7
 - 代码位置：`src/app/application.ts`
 - 硬依赖：[C02](02-storage-artifacts.md)至[C11](11-agent-event-loop.md)
@@ -45,7 +45,9 @@ load raw config
 
 ### 4.1 当前可编译基线
 
-当前 `createApplication()` 只组装内存 EventStore、空 ToolRegistry、基础 Runtime/Policy/Budget/Context/Gate 和只会创建 Session 的 Loop；返回对象暴露这些内部组件，没有生产配置、Provider、存储生命周期或用例 facade。
+旧 `createApplication()` 仍是内存骨架。Issue #7 另外提供 `startProductionReadonlySession()`：验证 workspace/goal 后创建持久 SQLite Session 与预算账户，组装 DeepSeek、六个只读工具、PermissionEngine、ToolRuntime、ExecutionJournal、CompletionGate 和最小 Loop，并返回只暴露 session ID、completion 与事件流的 `RunningReadonlySession`。
+
+`ReplayTailSessionEventSource` 在读取历史前先订阅提交事件，再按 sequence 合并历史与交界缓冲；终态后自动结束，慢消费者超过有界实时缓冲时 fail-closed 并返回最后游标恢复提示，已有持久历史不受实时缓冲上限误伤。确定性测试在 list/subscribe 交界注入事件，证明没有遗漏或重复。若 data dir 位于 workspace 内，runner 只允许放在任意 `.codeflow/` 子树并让 C09 工具统一拒绝读取；其他 workspace 内数据目录在创建 SQLite 前失败。该 runner 是单次 `run` 的纵向切片，不冒充下述完整 facade；instance lock、resume、并发 Session lease、配置文件和 shutdown 状态机仍延期。
 
 ### 4.2 目标接口（规划中）
 

@@ -2,7 +2,8 @@ import { resolve } from "node:path";
 
 import { Command } from "commander";
 
-import { createApplication } from "../app/application.js";
+import { executeReadonlyRun } from "./run-readonly-command.js";
+import { sanitizeTerminalText } from "./ui/session-task-tree.js";
 
 const VERSION = "0.1.0";
 
@@ -20,20 +21,45 @@ export function createProgram(): Command {
     .argument("[workspace]", "目标工作区", ".")
     .option("-p, --prompt <goal>", "任务目标")
     .action(async (workspace: string, options: { prompt?: string }) => {
-      const application = createApplication();
       const target = resolve(workspace);
 
       if (!options.prompt) {
-        printScaffoldNotice("run", `工作区：${target}`);
+        console.error("codeflow run requires --prompt <goal>.");
+        process.exitCode = 2;
         return;
       }
-
-      const session = await application.eventLoop.createSession({
-        goal: options.prompt,
-        workspace: target,
-      });
-      console.log(`已创建本地内存 Session：${session.sessionId}`);
-      console.log("D2–D4 将接通模型、工具与持久化执行循环；本次没有修改工作区。");
+      const apiKey = process.env.DEEPSEEK_API_KEY?.trim();
+      if (!apiKey) {
+        console.error("DEEPSEEK_API_KEY is required for codeflow run.");
+        process.exitCode = 2;
+        return;
+      }
+      const controller = new AbortController();
+      const onInterrupt = (): void => controller.abort();
+      process.once("SIGINT", onInterrupt);
+      try {
+        try {
+          const outcome = await executeReadonlyRun({
+            goal: options.prompt,
+            workspace: target,
+            signal: controller.signal,
+            deadlineAt: null,
+            dataDirectory: resolve(process.env.CODEFLOW_DATA_DIR ?? ".codeflow"),
+            apiKey,
+            model: process.env.CODEFLOW_MODEL ?? "deepseek-v4-flash",
+            timeoutMs: 90_000,
+            interactive: process.stdout.isTTY === true,
+            terminalWidth: process.stdout.columns,
+          });
+          process.exitCode = outcome.exitCode;
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(sanitizeTerminalText(`codeflow run failed: ${message}`));
+          process.exitCode = error instanceof TypeError ? 2 : 6;
+        }
+      } finally {
+        process.removeListener("SIGINT", onInterrupt);
+      }
     });
 
   program

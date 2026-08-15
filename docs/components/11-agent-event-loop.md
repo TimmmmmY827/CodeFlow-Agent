@@ -1,6 +1,6 @@
 # C11 AgentEventLoop
 
-- 状态：只有 `createSession`；真实循环缺失
+- 状态：Issue #7 最小持久只读 ReAct 循环已实现；恢复、HITL、写工具仍待开发
 - 目标阶段：D3–D4，D5–D7 接入 UI/持久化
 - 代码位置：`src/agent/agent-event-loop.ts`
 - 硬依赖：[C01](01-event-state.md)、[C02](02-storage-artifacts.md)、[C03](03-permission-engine.md)、[C04](04-budget-controller.md)、[C05](05-model-adapter.md)、[C06](06-context-assembler.md)、[C08](08-tool-runtime.md)、[C09](09-built-in-tools.md)、[C10](10-completion-gate.md)
@@ -38,7 +38,7 @@
 
 ## 4. 循环伪代码
 
-当前 `AgentEventLoop` 只实现 `createSession` 并追加 `session.created`；下列循环是 C11 目标调度语义（规划中），不是当前可调用实现。
+当前 `AgentEventLoop` 同时保留轻量 `createSession`，并实现文末冻结的 `runReadonlySession()` 最小纵向切片；下列完整循环仍是 C11 目标调度语义，超出只读切片的恢复/HITL/写操作部分尚不可调用。
 
 ```ts
 while (!terminal) {

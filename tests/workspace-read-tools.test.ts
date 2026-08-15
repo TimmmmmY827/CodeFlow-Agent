@@ -23,6 +23,8 @@ describe("workspace read tools", () => {
     await writeFile(join(workspace, "README.md"), "# Fixture\n", "utf8");
     await mkdir(join(workspace, "node_modules"));
     await writeFile(join(workspace, "node_modules", "ignored.js"), "secret", "utf8");
+    await mkdir(join(workspace, ".codeflow"));
+    await writeFile(join(workspace, ".codeflow", "codeflow.sqlite"), "durable session data", "utf8");
     const registry = new ToolRegistry();
     registerWorkspaceReadTools(registry);
     runtime = new ToolRuntime(registry, new PermissionEngine());
@@ -62,6 +64,18 @@ describe("workspace read tools", () => {
       },
     });
     expect((result.output as JsonObject | null)?.sha256 ?? "").toMatch(/^sha256:[0-9a-f]{64}$/u);
+  });
+
+  it("does not expose the local CodeFlow data directory even by exact path", async () => {
+    const listed = await runtime.execute(request(workspace, "list_files", { maxDepth: 2, maxEntries: 20 }));
+    const read = await runtime.execute(request(workspace, "read_file", { path: ".codeflow/codeflow.sqlite" }));
+    const searched = await runtime.execute(request(workspace, "search_text", { path: ".codeflow", query: "session" }));
+
+    expect((listed.output as JsonObject | null)?.entries ?? []).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: expect.stringContaining(".codeflow") }),
+    ]));
+    expect(read).toMatchObject({ status: "failed", error: { category: "path_ignored" } });
+    expect(searched).toMatchObject({ status: "failed", error: { category: "path_ignored" } });
   });
 
   it("searches text with structured bounded matches", async () => {
