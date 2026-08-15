@@ -72,7 +72,7 @@ export class SqliteApprovalRepository implements ApprovalRepository {
           "Create a new approval request with a future expiration.",
         );
       }
-      const record = approvalRecordSchema.parse({
+      const record = createApprovalRecord({
         schemaVersion: PERMISSION_SCHEMA_VERSION,
         approvalId: checked.approvalId,
         binding: checked.binding,
@@ -116,7 +116,20 @@ INSERT INTO approvals(
     const checkedId = parseApprovalId(approvalId);
     try {
       const row = this.#loadRow(checkedId);
-      return row ? decodeApproval(row) : null;
+      if (!row) return null;
+      const record = decodeApproval(row);
+      if (!canExpire(record) || !isExpired(record.expiresAt, this.storage.clock.utcNow())) {
+        return record;
+      }
+      return this.#transaction(() => {
+        const current = this.#require(checkedId);
+        const now = this.storage.clock.utcNow();
+        if (!canExpire(current) || !isExpired(current.expiresAt, now)) return current;
+        this.#assertSessionActive(current);
+        const expired = transition(current, "expired", now, "Approval reached its expiration.");
+        this.#write(expired);
+        return expired;
+      });
     } catch (error: unknown) {
       throw translateApprovalStorageError(error);
     }
@@ -131,6 +144,11 @@ INSERT INTO approvals(
 
     return this.#transaction(() => {
       const record = this.#require(checkedId);
+      if (!canExpire(record)) {
+        if (record.state === input.decision) return record;
+        throw invalidTransition(record, input.decision);
+      }
+      this.#assertSessionActive(record);
       const now = this.storage.clock.utcNow();
       if (isExpired(record.expiresAt, now)) {
         const expired = transition(record, "expired", now, "Approval expired before a decision.");
@@ -163,8 +181,10 @@ INSERT INTO approvals(
   }
 
   /**
-   * C08 can call this only after opening its own SQLite transaction, allowing
-   * approval consumption to commit atomically with budget and execution facts.
+   * C08 can call this only after opening its own SQLite transaction. The first
+   * statement acquires/upgrades to the SQLite write lock before approval state
+   * is read, so a DEFERRED transaction either becomes serialized or fails
+   * closed instead of consuming from a stale snapshot.
    */
   consumeWithinTransaction(input: ConsumeApprovalInput): ApprovalRecord {
     if (!this.storage.database.isTransaction) {
@@ -175,9 +195,15 @@ INSERT INTO approvals(
         "Open the C08 execution transaction before consuming the approval.",
       );
     }
-    const result = this.#consumeTransition(validateConsume(input));
-    if (result.error) throw result.error;
-    return result.record;
+    const checked = validateConsume(input);
+    try {
+      this.#acquireExecutionWriteLock();
+      const result = this.#consumeTransition(checked);
+      if (result.error) throw result.error;
+      return result.record;
+    } catch (error: unknown) {
+      throw translateApprovalStorageError(error);
+    }
   }
 
   async invalidate(approvalId: StableId, reason: string): Promise<ApprovalRecord> {
@@ -187,6 +213,7 @@ INSERT INTO approvals(
       const record = this.#require(checkedId);
       if (record.state === "invalidated") return record;
       if (record.state !== "approved") throw invalidTransition(record, "invalidated");
+      this.#assertSessionActive(record);
       const invalidated = transition(record, "invalidated", this.storage.clock.utcNow(), checkedReason);
       this.#write(invalidated);
       return invalidated;
@@ -201,6 +228,7 @@ INSERT INTO approvals(
       if (record.state !== "issued" && record.state !== "approved") {
         throw invalidTransition(record, "expired");
       }
+      this.#assertSessionActive(record);
       const now = this.storage.clock.utcNow();
       if (!isExpired(record.expiresAt, now)) {
         throw approvalError(
@@ -231,6 +259,7 @@ INSERT INTO approvals(
     }
     const now = this.storage.clock.utcNow();
     if (isExpired(record.expiresAt, now) && (record.state === "issued" || record.state === "approved")) {
+      this.#assertSessionActive(record);
       const expired = transition(record, "expired", now, "Approval expired before consumption.");
       this.#write(expired);
       return {
@@ -252,7 +281,9 @@ INSERT INTO approvals(
       );
     }
     if (record.state !== "approved") throw invalidTransition(record, "consumed");
-    const consumed = approvalRecordSchema.parse({
+    this.#assertSessionActive(record);
+    assertTransitionTime(record, now);
+    const consumed = createApprovalRecord({
       ...record,
       state: "consumed",
       consumedAt: now,
@@ -290,6 +321,37 @@ INSERT INTO approvals(
         "The operation Task does not belong to the approval Session.",
         false,
         "Rebuild the operation binding from the active Task.",
+      );
+    }
+  }
+
+  #assertSessionActive(record: ApprovalRecord): void {
+    const session = this.storage.database
+      .prepare("SELECT deletion_state FROM sessions WHERE session_id = ?")
+      .get(record.binding.sessionId);
+    if (!session || session.deletion_state !== "active") {
+      throw approvalError(
+        "approval_session_unavailable",
+        "The approval Session does not exist or is being deleted.",
+        false,
+        "Do not mutate or consume approvals after Session deletion begins.",
+      );
+    }
+  }
+
+  #acquireExecutionWriteLock(): void {
+    const result = this.storage.database
+      .prepare(`
+UPDATE storage_installation
+SET schema_version = schema_version
+WHERE singleton = 1`)
+      .run();
+    if (result.changes !== 1) {
+      throw approvalError(
+        "approval_storage_corrupt",
+        "The storage installation record is missing during approval consumption.",
+        false,
+        "Stop execution and inspect the storage installation metadata.",
       );
     }
   }
@@ -424,13 +486,43 @@ function transition(
   occurredAt: UtcTimestamp,
   reason: string,
 ): ApprovalRecord {
-  return approvalRecordSchema.parse({
+  assertTransitionTime(record, occurredAt);
+  return createApprovalRecord({
     ...record,
     state,
     resolvedAt: occurredAt,
     consumedAt: null,
     decisionReason: reason,
   });
+}
+
+function createApprovalRecord(input: unknown): ApprovalRecord {
+  const parsed = approvalRecordSchema.safeParse(input);
+  if (!parsed.success) {
+    throw approvalError(
+      "approval_state_invalid",
+      "The approval state transition does not satisfy the current permission schema.",
+      false,
+      "Stop the transition and inspect the approval inputs and injected Clock.",
+    );
+  }
+  return parsed.data;
+}
+
+function assertTransitionTime(record: ApprovalRecord, occurredAt: UtcTimestamp): void {
+  const previous = record.resolvedAt ?? record.issuedAt;
+  if (Date.parse(occurredAt) < Date.parse(previous)) {
+    throw approvalError(
+      "approval_clock_regressed",
+      "The injected Clock moved behind the previous durable approval transition.",
+      true,
+      "Restore a trustworthy wall clock before retrying the approval transition.",
+    );
+  }
+}
+
+function canExpire(record: ApprovalRecord): boolean {
+  return record.state === "issued" || record.state === "approved";
 }
 
 function decodeApproval(row: ApprovalRow): ApprovalRecord {

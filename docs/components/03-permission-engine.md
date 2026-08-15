@@ -70,6 +70,10 @@ operationHash = sha256(canonicalJson(operationBinding))
 
 `SqliteApprovalRepository` 持久化固定状态机，并提供只能在已有 SQLite 事务内调用的 `consumeWithinTransaction()`。C08 在工具开始执行前把它与预算、operation 和 `tool.started` 一起提交；消费后即使工具失败也不得自动复用，外部写失败进入 `UNKNOWN` 并先对账。
 
+Repository 的 `get()` 会在读取到已到期的 `issued/approved` 记录时以 `BEGIN IMMEDIATE` 惰性持久化为 `expired`，因此展示层不会把过期记录误呈现为可用。`consumeWithinTransaction()` 在读取审批前执行受控写以取得或升级 SQLite 写锁；C08 仍应在 commit fence 前以 `BEGIN IMMEDIATE` 开始执行事务，锁升级失败必须 fail closed。所有会改变审批状态的路径都会在同一写事务复查 Session 仍为 `active`。
+
+`invalidated` 严格保留为 `approved -> invalidated`，用于批准后 binding/snapshot 失效；尚未决策的 `issued` 请求若被用户或控制流取消，使用 `resolve(..., decision: "denied")` 留下明确拒绝事实。Session 删除则遵循 C14 隐私契约：删除原始 approval 行，只在最小删除墓碑中保留 approval target 数量，不把可恢复的审批摘要长期留存。
+
 PermissionEngine 必须注入 C00 `Clock`，不得直接读取 `Date.now()`。`Date.parse(expiresAt) <= Date.parse(clock.utcNow())` 视为已经过期，解析失败为 deny，过期为重新请求批准；测试使用虚拟时钟覆盖等于边界和时钟前后跳变。
 
 ## 5. 功能需求

@@ -14,6 +14,7 @@ import { binding, hash } from "./fixtures/permission.js";
 const ISSUED_AT = "2026-08-15T10:00:00.000Z" as const;
 const APPROVED_AT = "2026-08-15T10:01:00.000Z" as const;
 const EXPIRES_AT = "2026-08-15T10:05:00.000Z" as const;
+const AFTER_EXPIRY = "2026-08-15T10:06:00.000Z" as const;
 const APPROVAL_ID = "44444444-4444-4444-8444-444444444444";
 
 const temporaryDirectories: string[] = [];
@@ -75,6 +76,9 @@ describe("SqliteApprovalRepository", () => {
     const recovered = new SqliteApprovalRepository(reopened);
     await expect(recovered.consume({ approvalId: APPROVAL_ID, operationHash: operationHash! }))
       .rejects.toMatchObject({ details: { category: "approval_already_consumed" } });
+    fixture.clock.now = AFTER_EXPIRY;
+    await expect(recovered.resolve({ approvalId: APPROVAL_ID, decision: "approved", reason: null }))
+      .rejects.toMatchObject({ details: { category: "approval_transition_invalid" } });
     await expect(recovered.get(APPROVAL_ID)).resolves.toMatchObject({ state: "consumed" });
   });
 
@@ -86,7 +90,9 @@ describe("SqliteApprovalRepository", () => {
     fixture.clock.now = APPROVED_AT;
     await repository.resolve({ approvalId: APPROVAL_ID, decision: "approved", reason: null });
 
-    storage.database.exec("BEGIN IMMEDIATE");
+    // The participant upgrades a DEFERRED transaction to a write transaction
+    // before reading approval state, then remains part of the caller rollback.
+    storage.database.exec("BEGIN");
     repository.consumeWithinTransaction({
       approvalId: APPROVAL_ID,
       operationHash: createOperationHash(binding()),
@@ -114,6 +120,7 @@ describe("SqliteApprovalRepository", () => {
       decision: "denied",
       reason: "Do not publish this branch.",
     })).resolves.toMatchObject({ state: "denied", decisionReason: "Do not publish this branch." });
+    fixture.clock.now = AFTER_EXPIRY;
     await expect(repository.resolve({ approvalId: APPROVAL_ID, decision: "approved", reason: null }))
       .rejects.toMatchObject({ details: { category: "approval_transition_invalid" } });
     await expect(repository.consume({
@@ -143,14 +150,112 @@ describe("SqliteApprovalRepository", () => {
       .resolves.toMatchObject({ state: "expired" });
   });
 
-  it("fails closed when canonical approval JSON or indexed facts are tampered", async () => {
+  it("lazily persists expiry on get and supports explicit approved invalidation", async () => {
+    const expiryFixture = createFixture();
+    using expiryStorage = expiryFixture.storage;
+    const expiryRepository = new SqliteApprovalRepository(expiryStorage);
+    await expiryRepository.issue(issueInput());
+    expiryFixture.clock.now = EXPIRES_AT;
+
+    await expect(expiryRepository.get(APPROVAL_ID)).resolves.toMatchObject({
+      state: "expired",
+      decisionReason: "Approval reached its expiration.",
+    });
+    expect(expiryStorage.database
+      .prepare("SELECT decision FROM approvals WHERE approval_id = ?")
+      .get(APPROVAL_ID)).toEqual({ decision: "expired" });
+
+    const explicitExpiryFixture = createFixture();
+    using explicitExpiryStorage = explicitExpiryFixture.storage;
+    const explicitExpiryRepository = new SqliteApprovalRepository(explicitExpiryStorage);
+    await explicitExpiryRepository.issue(issueInput());
+    explicitExpiryFixture.clock.now = EXPIRES_AT;
+    await expect(explicitExpiryRepository.expire(APPROVAL_ID))
+      .resolves.toMatchObject({ state: "expired" });
+
+    const invalidateFixture = createFixture();
+    using invalidateStorage = invalidateFixture.storage;
+    const invalidateRepository = new SqliteApprovalRepository(invalidateStorage);
+    await invalidateRepository.issue(issueInput());
+    invalidateFixture.clock.now = APPROVED_AT;
+    await invalidateRepository.resolve({ approvalId: APPROVAL_ID, decision: "approved", reason: null });
+    await expect(invalidateRepository.invalidate(APPROVAL_ID, "The code snapshot changed."))
+      .resolves.toMatchObject({ state: "invalidated", decisionReason: "The code snapshot changed." });
+    invalidateFixture.clock.now = AFTER_EXPIRY;
+    await expect(invalidateRepository.resolve({
+      approvalId: APPROVAL_ID,
+      decision: "approved",
+      reason: null,
+    })).rejects.toMatchObject({ details: { category: "approval_transition_invalid" } });
+    await expect(invalidateRepository.get(APPROVAL_ID)).resolves.toMatchObject({ state: "invalidated" });
+    await expect(invalidateRepository.consume({
+      approvalId: APPROVAL_ID,
+      operationHash: createOperationHash(binding()),
+    })).rejects.toMatchObject({ details: { category: "approval_transition_invalid" } });
+  });
+
+  it("blocks decisions and consumption once Session deletion begins", async () => {
+    const fixture = createFixture();
+    using storage = fixture.storage;
+    const repository = new SqliteApprovalRepository(storage);
+    await repository.issue(issueInput());
+    fixture.clock.now = APPROVED_AT;
+    storage.database.prepare("UPDATE sessions SET deletion_state = 'deleting' WHERE session_id = ?")
+      .run(binding().sessionId);
+
+    await expect(repository.resolve({ approvalId: APPROVAL_ID, decision: "approved", reason: null }))
+      .rejects.toMatchObject({ details: { category: "approval_session_unavailable" } });
+
+    storage.database.prepare("UPDATE sessions SET deletion_state = 'active' WHERE session_id = ?")
+      .run(binding().sessionId);
+    await repository.resolve({ approvalId: APPROVAL_ID, decision: "approved", reason: null });
+    storage.database.prepare("UPDATE sessions SET deletion_state = 'deleting' WHERE session_id = ?")
+      .run(binding().sessionId);
+    await expect(repository.consume({
+      approvalId: APPROVAL_ID,
+      operationHash: createOperationHash(binding()),
+    })).rejects.toMatchObject({ details: { category: "approval_session_unavailable" } });
+  });
+
+  it("reports an injected Clock rollback as an approval error without changing state", async () => {
+    const fixture = createFixture();
+    using storage = fixture.storage;
+    const repository = new SqliteApprovalRepository(storage);
+    await repository.issue(issueInput());
+    fixture.clock.now = "2026-08-15T09:59:00.000Z";
+
+    await expect(repository.resolve({ approvalId: APPROVAL_ID, decision: "approved", reason: null }))
+      .rejects.toMatchObject({ details: { category: "approval_clock_regressed" } });
+    await expect(repository.get(APPROVAL_ID)).resolves.toMatchObject({ state: "issued" });
+  });
+
+  it("rejects preserved v1 approval rows that lack a complete binding", async () => {
+    const fixture = createFixture();
+    using storage = fixture.storage;
+    storage.database.prepare(`
+INSERT INTO approvals(
+  approval_id, session_id, schema_version, tool_name, operation_hash,
+  decision, expires_at, decided_at
+) VALUES (?, ?, 1, 'publish', 'legacy-hash', 'approved', ?, ?)`)
+      .run(APPROVAL_ID, binding().sessionId, EXPIRES_AT, ISSUED_AT);
+
+    await expect(new SqliteApprovalRepository(storage).get(APPROVAL_ID)).rejects.toMatchObject({
+      details: { category: "legacy_approval_unusable" },
+    });
+  });
+
+  it.each([
+    ["indexed operation hash", "UPDATE approvals SET operation_hash = ? WHERE approval_id = ?", hash("f")],
+    ["indexed tool name", "UPDATE approvals SET tool_name = ? WHERE approval_id = ?", "other_tool"],
+    ["canonical JSON", "UPDATE approvals SET record_json = ? WHERE approval_id = ?", "{"],
+    ["canonical record hash", "UPDATE approvals SET record_hash = ? WHERE approval_id = ?", hash("b")],
+  ])("fails closed when %s is tampered", async (_label, statement, value) => {
     const fixture = createFixture();
     using storage = fixture.storage;
     const repository = new SqliteApprovalRepository(storage);
     await repository.issue(issueInput());
 
-    storage.database.prepare("UPDATE approvals SET operation_hash = ? WHERE approval_id = ?")
-      .run(hash("f"), APPROVAL_ID);
+    storage.database.prepare(statement).run(value, APPROVAL_ID);
     await expect(repository.get(APPROVAL_ID)).rejects.toMatchObject({
       details: { category: "approval_storage_corrupt" },
     });
