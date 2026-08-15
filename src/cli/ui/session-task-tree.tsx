@@ -1,5 +1,5 @@
 import { Box, Text } from "ink";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import type { AgentEvent } from "../../events/agent-event.js";
 import { structuredErrorSchema, type StructuredError } from "../../shared/contracts.js";
@@ -32,6 +32,7 @@ export interface SessionTaskTreeProps {
 }
 
 export interface LiveSessionTaskTreeProps {
+  /** One logical Session source. Change the React key to bind the view to another Session. */
   readonly source: SessionEventSource;
   readonly width?: number;
 }
@@ -51,14 +52,16 @@ export function LiveSessionTaskTree({ source, width = 80 }: LiveSessionTaskTreeP
   const [projector] = useState(() => new SessionTaskTreeProjector());
   const [model, setModel] = useState<SessionTaskTreeViewModel | null>(null);
   const [error, setError] = useState<StructuredError | null>(null);
+  const sourceRef = useRef(source);
+  sourceRef.current = source;
 
   useEffect(() => {
     const controller = new AbortController();
-    void consumeSessionEvents(source, projector, setModel, controller.signal).catch((reason: unknown) => {
+    void consumeSessionEvents(sourceRef.current, projector, setModel, controller.signal).catch((reason: unknown) => {
       if (!controller.signal.aborted) setError(toStructuredError(reason));
     });
     return () => controller.abort();
-  }, [projector, source]);
+  }, [projector]);
 
   if (error) {
     return (
@@ -277,6 +280,6 @@ function toStructuredError(error: unknown): StructuredError {
     message: error instanceof Error ? error.message : "The Session event stream failed.",
     retryable: true,
     sideEffectStatus: "none",
-    recovery: "Reconnect from the last rendered sequence.",
+    recovery: "Restore the event stream and remount the task tree; replayed duplicate events are idempotent.",
   };
 }

@@ -204,6 +204,13 @@ export class SessionTaskTreeProjector {
       candidate.operationHash === operationHash &&
       (candidate.status === "running" || (event.type === "operation.reconciled" && candidate.status === "unknown"))
     );
+    if (matches.length > 1) {
+      throw projectionError(
+        "event_operation_mismatch",
+        `Operation ${name} has multiple candidate spans for the same operation hash.`,
+        "Bind the terminal fact to the exact started operation span.",
+      );
+    }
     return matches.length === 1 ? matches[0]?.spanId ?? null : null;
   }
 

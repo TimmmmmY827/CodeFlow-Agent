@@ -83,6 +83,45 @@ describe("C13 live Session task tree", () => {
     );
   });
 
+  it("fails closed when a terminal operation hash matches multiple active spans", () => {
+    const projector = new SessionTaskTreeProjector();
+    const [created, started] = completedTrace("Disambiguate operations");
+    if (!created || !started) throw new Error("Trace fixture is incomplete.");
+    const identity = {
+      sessionId: created.sessionId,
+      taskId: created.taskId,
+      traceId: created.traceId,
+      occurredAt: NOW,
+    } as const;
+    projector.apply(created);
+    projector.apply(started);
+    for (const sequence of [2, 3]) {
+      projector.apply(createAgentEvent({
+        ...identity,
+        spanId: randomUUID(),
+        sequence,
+        type: "tool.started",
+        context: createEventContext({
+          workspacePath: "C:/workspace",
+          operation: { kind: "tool", name: "publish", status: "running", durationMs: null, operationHash: "shared-hash" },
+        }),
+      }));
+    }
+
+    expect(() => projector.apply(createAgentEvent({
+      ...identity,
+      spanId: randomUUID(),
+      sequence: 4,
+      type: "tool.completed",
+      context: createEventContext({
+        workspacePath: "C:/workspace",
+        operation: { kind: "tool", name: "publish", status: "completed", durationMs: 1, operationHash: "shared-hash" },
+      }),
+    }))).toThrowError(expect.objectContaining<Partial<SessionTaskTreeProjectionError>>({
+      details: expect.objectContaining({ category: "event_operation_mismatch" }),
+    }));
+  });
+
   it("consumes the C12-shaped event stream incrementally", async () => {
     const events = completedTrace("Stream events");
     let receivedOptions: { afterSequence: number; signal: AbortSignal } | null = null;
