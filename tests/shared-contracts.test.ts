@@ -174,11 +174,22 @@ describe("shared contracts", () => {
     const model: ModelAdapter = {
       provider: "test",
       model: "test-model",
+      capabilities: () => ({
+        protocolVersion: "model-adapter:v1",
+        streaming: false,
+        toolCalling: true,
+        parallelToolCalls: true,
+        reasoningContinuation: false,
+        serverSideTools: false,
+      }),
       generate: async (request) => {
         modelSignal = request.signal;
         return {
           responseId: "response-1",
+          model: "test-model",
           outputText: "done",
+          toolCalls: [],
+          finishReason: "stop",
           usage: {
             inputTokens: 1,
             outputTokens: 1,

@@ -32,7 +32,7 @@
 | C02 | [存储与 ArtifactStore](02-storage-artifacts.md) | D7 | 核心持久化、可续跑物理删除、保留与恢复检查已实现；C08/C11 journal 和原生 Windows 路径加固延期 | C00、C01 | Runtime、Session、Loop、Trace |
 | C03 | [PermissionEngine](03-permission-engine.md) | D1–D6 | 权限契约与持久审批已实现；C08 接线待完成 | C00 | Runtime、Loop、CLI、发布工具 |
 | C04 | [BudgetController](04-budget-controller.md) | D3–D5 | 核心已实现，待下游接线 | C00；SQLite adapter 使用 C02 | Loop、CLI、Eval |
-| C05 | [ModelAdapter](05-model-adapter.md) | D2 | 最小非流式实现 | C00、C01 | Context、Loop、成本账本 |
+| C05 | [ModelAdapter](05-model-adapter.md) | D2 | Issue #7 非流式 tool calling 切片已实现；SSE/reasoning 延期 | C00、C01 | Context、Loop、成本账本 |
 | C06 | [ContextAssembler](06-context-assembler.md) | D3 | 排序骨架 | C00、C01、C05、C07 | Model、Loop |
 | C07 | [ToolDefinition 与 ToolRegistry](07-tool-registry.md) | D1–D3 | 基础实现 | C00 | Runtime、Context、Loop |
 | C08 | [ToolRuntime](08-tool-runtime.md) | D3–D4 | 基础流水线；版本/输出 schema 等缺失 | C00–C04、C07（不含 C05/C06） | 内置工具、Loop、Trace |
