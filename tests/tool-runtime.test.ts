@@ -3,13 +3,110 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { describe, expect, it } from "vitest";
 
+import type { AgentEvent } from "../src/events/agent-event.js";
+import type { ExecutionJournal, FinishExecutionInput } from "../src/events/execution-journal.js";
 import { PermissionEngine } from "../src/policy/permission-engine.js";
 import { createLegacyOperationHash } from "../src/policy/operation-hash.js";
 import type { ArtifactWriter } from "../src/storage/storage.js";
 import { ToolRegistry } from "../src/tools/tool-registry.js";
 import { ToolRuntime, type ToolExecutionRequest } from "../src/tools/tool-runtime.js";
+import { ToolExecutionError } from "../src/tools/tool.js";
 
 describe("ToolRuntime", () => {
+  it("settles a durable start without executing when cancellation wins the commit fence", async () => {
+    const controller = new AbortController();
+    let executions = 0;
+    const finishes: FinishExecutionInput[] = [];
+    const journal: ExecutionJournal = {
+      append: async () => ({} as AgentEvent),
+      begin: async (input) => {
+        controller.abort();
+        return {
+          operationId: randomUUID(),
+          reservationId: randomUUID(),
+          spanId: randomUUID(),
+          identity: input.identity,
+          kind: input.kind,
+          name: input.name,
+          operationHash: input.operationHash,
+          startedAt: "2026-08-15T00:00:00.000Z",
+        };
+      },
+      finish: async (input) => {
+        finishes.push(input);
+        return {} as AgentEvent;
+      },
+    };
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "read_file",
+      description: "Read",
+      risk: "automatic",
+      sideEffect: "none",
+      retryPolicy: "safe",
+      inputSchema: z.object({}),
+      execute: async () => { executions += 1; return { ok: true }; },
+    });
+    const runtime = new ToolRuntime(registry, new PermissionEngine(), { journal });
+
+    const result = await runtime.execute({
+      ...request("read_file", {}),
+      signal: controller.signal,
+      traceId: randomUUID(),
+    });
+
+    expect(result).toMatchObject({ status: "cancelled", sideEffectStatus: "none" });
+    expect(executions).toBe(0);
+    expect(finishes).toHaveLength(1);
+    expect(finishes[0]).toMatchObject({ status: "cancelled", actual: { toolCalls: 0 } });
+  });
+
+  it("isolates non-authoritative observer failures", async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "read_file",
+      description: "Read",
+      risk: "automatic",
+      sideEffect: "none",
+      retryPolicy: "safe",
+      inputSchema: z.object({}),
+      execute: async () => ({ ok: true }),
+    });
+    const runtime = new ToolRuntime(registry, new PermissionEngine(), {
+      observe: () => { throw new Error("observer unavailable"); },
+    });
+
+    await expect(runtime.execute(request("read_file", {}))).resolves.toMatchObject({ status: "completed" });
+  });
+
+  it("preserves stable provider failure categories", async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "bounded_read",
+      description: "Reject an unsafe read",
+      risk: "automatic",
+      sideEffect: "none",
+      retryPolicy: "safe",
+      inputSchema: z.object({}),
+      execute: async () => {
+        throw new ToolExecutionError({
+          category: "workspace_boundary_violation",
+          message: "The requested path escapes the workspace.",
+          retryable: false,
+          sideEffectStatus: "none",
+          recovery: null,
+        });
+      },
+    });
+
+    const result = await new ToolRuntime(registry, new PermissionEngine()).execute(request("bounded_read", {}));
+
+    expect(result).toMatchObject({
+      status: "failed",
+      error: { category: "workspace_boundary_violation", sideEffectStatus: "none" },
+    });
+  });
+
   it("validates input and returns a uniform result envelope", async () => {
     const registry = new ToolRegistry();
     registry.register({

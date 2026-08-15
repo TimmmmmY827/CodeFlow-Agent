@@ -1,4 +1,11 @@
 export { AgentEventLoop } from "./agent/agent-event-loop.js";
+export type {
+  AgentEventLoopOptions,
+  CreatedSession,
+  CreateSessionRequest,
+  RunReadonlySessionRequest,
+  RunReadonlySessionResult,
+} from "./agent/agent-event-loop.js";
 export { createApplication } from "./app/application.js";
 export {
   CompletionGate,
@@ -33,6 +40,14 @@ export {
   InMemoryEventStore,
 } from "./events/event-store.js";
 export type {
+  AppendExecutionEventInput,
+  BeginExecutionInput,
+  ExecutionIdentity,
+  ExecutionJournal,
+  ExecutionLease,
+  FinishExecutionInput,
+} from "./events/execution-journal.js";
+export type {
   EventAppendResult,
   EventListener,
   EventReader,
@@ -60,6 +75,13 @@ export type {
   DeepSeekCompletionTransport,
 } from "./model/deepseek-chat-adapter.js";
 export { DeepSeekResponsesAdapter } from "./model/deepseek-responses-adapter.js";
+export {
+  DEEPSEEK_PRICES,
+  DEEPSEEK_PRICING_VERSION,
+  estimateDeepSeekCostUsd,
+  priceDeepSeekUsage,
+} from "./model/deepseek-pricing.js";
+export type { DeepSeekPrice, PricedModelUsage } from "./model/deepseek-pricing.js";
 export {
   MODEL_ADAPTER_PROTOCOL_VERSION,
   ModelAdapterError,
@@ -135,6 +157,7 @@ export {
   taskAuthorizationSchema,
 } from "./policy/permission-contracts.js";
 export { SqliteBudgetLedger } from "./storage/sqlite/sqlite-budget-ledger.js";
+export { SqliteExecutionJournal } from "./storage/sqlite/sqlite-execution-journal.js";
 export type {
   ApprovalRecord,
   ApprovalRepository,
@@ -161,6 +184,18 @@ export {
 export * from "./shared/index.js";
 export * from "./storage/storage.js";
 export { ToolRegistry } from "./tools/tool-registry.js";
+export type { ProjectedToolDefinition } from "./tools/tool-registry.js";
 export { ToolRuntime } from "./tools/tool-runtime.js";
+export { ToolExecutionError } from "./tools/tool.js";
 export { createFinishTaskTool } from "./tools/builtin/finish-task.js";
+export {
+  createGitDiffTool,
+  createGitLogTool,
+  createGitStatusTool,
+  createListFilesTool,
+  createReadFileTool,
+  createSearchTextTool,
+  createWorkspaceReadTools,
+  registerWorkspaceReadTools,
+} from "./tools/builtin/workspace-read-tools.js";
 export { exportSanitizedTrace } from "./trace/trace-exporter.js";

@@ -194,6 +194,8 @@ interface ToolResultEnvelope<O = unknown> {
 
 ## 9. 验收标准
 
+Provider 可抛出只携带 `StructuredError` 的 `ToolExecutionError`；Runtime 必须保留其稳定 category、retryable 与 side-effect status，禁止把工作区边界、编码或 provider availability 错误压扁成通用异常。该错误不携带 SDK/CLI 原生类型。
+
 - `RUNTIME-AC-001`：流水线每一阶段的失败都不执行后续阶段。
 - `RUNTIME-AC-002`：参数重排 hash 稳定；参数或 codeVersion 改变使批准失效。
 - `RUNTIME-AC-003`：同一批准第二次使用被拒绝。
