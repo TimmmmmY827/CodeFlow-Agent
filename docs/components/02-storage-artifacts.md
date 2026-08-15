@@ -231,6 +231,7 @@ pin 必须把 `expiresAt` 清为 null；unpin 必须由调用方按当前保留�
 - SQLite 使用 WAL、foreign keys 和 busy timeout。
 - `src/storage/sqlite/migrations.ts` 是唯一运行时 schema 来源；`schema_migrations` 记录版本、名称与 checksum，历史 checksum 漂移、版本缺口、数据库新于应用或 `user_version` 不一致均 fail closed。旧 `schema.sql` 只保留为 D1 历史快照，不参与启动。
 - v3 migration 为 C04 创建 `budget_accounts`，并为既有 `usage_entries` 增加 operation/idempotency/kind/ledger sequence/reservation、canonical hash 与首次结果快照字段。C04 adapter 对每条索引列、canonical JSON/hash、连续 sequence 和 account watermark fail closed；旧 usage 行仍可由删除传播管理，但不冒充 C04 ledger fact。
+- 需要组合批准、预算、operation 与事件的 journal 必须由 `SqliteStorageDatabase.runImmediateTransaction()` 承载。该同步宿主在任何业务读取前执行 `BEGIN IMMEDIATE`、禁止嵌套和 Promise/thenable callback，并在 callback 抛错时整体回滚；C03/C04 的 `*WithinTransaction` 会拒绝普通 `BEGIN`/DEFERRED 事务，避免 WAL `BUSY_SNAPSHOT` 锁升级死路。
 - Artifact 采用 `temporary -> staged -> ready` 协议：先在目标目录写随机临时文件、flush/关闭并计算 hash；随后登记 `staged` 元数据；原子重命名成功并再次验证 hash 后，以 `state = staged` 且 Session 仍 active 的 CAS 标记 `ready`。CAS 失败不得返回引用，恢复程序也不得复活 deleting Artifact。恢复和普通读取必须复用同一 no-follow 路径解析，不能让 symlink 目标保持 ready。事件和工具结果只能引用 `ready` Artifact。
 - Artifact root 只允许由写入/恢复路径首次绑定；绑定后的普通 `read/inspect` 只执行指纹读查询，不申请 SQLite 写锁。普通 `read` 验证本次返回字节但不更新 `verifiedAt`；显式 `verify` 才持久化验证水位。
 - 崩溃后临时文件无记录：按 TTL 清理；`staged` 记录和临时文件都存在：继续原子重命名；最终文件存在但仍为 `staged`：验证后标记 `ready`；`ready` 记录对应文件缺失或 hash 不符：标记损坏，不能伪造工具成功。

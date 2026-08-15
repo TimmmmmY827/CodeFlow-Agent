@@ -127,7 +127,7 @@ interface ToolResultEnvelope {
 }
 ```
 
-journal adapter 必须在自己打开的 SQLite 事务内调用 C03 `consumeWithinTransaction` 和 C04 `reserveWithinTransaction`，随后写 operation 与 `tool.started` 再统一提交；finish/fail 则调用 C04 `commitWithinTransaction`（已开始，即使 usage 缺失也保守结算），只有明确未开始才允许 `releaseWithinTransaction`。这些方法都是同步事务片段，事务体不得跨 `await`。
+journal adapter 必须通过 C02 `SqliteStorageDatabase.runImmediateTransaction()` 在任何业务读取前取得 IMMEDIATE 写锁，再调用 C03 `consumeWithinTransaction` 和 C04 `reserveWithinTransaction`，随后写 operation 与 `tool.started` 并统一提交；finish/fail 则调用 C04 `commitWithinTransaction`（已开始，即使 usage 缺失也保守结算），只有明确未开始才允许 `releaseWithinTransaction`。这些方法都是同步事务片段，事务体不得跨 `await`；普通 DEFERRED transaction 不被接受。
 
 ### 4.2 目标接口（规划中）
 

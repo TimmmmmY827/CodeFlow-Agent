@@ -63,6 +63,8 @@ interface BudgetSnapshot {
   pricingVersion: string | null;
   countWaitingTime: boolean;
   softLimitRatio: number;
+  limitStatus: "within" | "soft_limit" | "hard_limit" | "pricing_unknown";
+  limitDimensions: BudgetDimension[];
   updatedAt: UtcTimestamp;
   lastLedgerSequence: number;
 }
@@ -80,6 +82,7 @@ interface BudgetLedgerEntry {
   usageBasis: "estimated" | "actual" | "conservative" | "not_applicable";
   admission: "allow" | "warn" | "recorded";
   warningDimensions: BudgetDimension[];
+  costReconciliation: CostReconciliation | null;
   reconciliationRequired: boolean;
   evidence: RetryEvidence | NoProgressEvidence | null;
   createdAt: UtcTimestamp;
@@ -92,7 +95,11 @@ MVP 默认单任务最长 20 分钟、已验收任务平均不超过 1 美元；
 
 `BudgetLedger.initialize` 把 policy 与 pricingVersion 完整绑定到 Session；同 Session 不允许用不同参数再次初始化。`reserve/commit/release/adjust` 均由调用方提供 entry ID、稳定 operation ID 和幂等键。相同键与相同内容返回首次持久化的 entry 及当时 snapshot；相同键不同内容返回 `budget_idempotency_conflict`。commit/release 必须引用仍 open 且属于同一 Session/operation 的 reservation。
 
+`listOpenReservations(sessionId)` 从 durable ledger 计算所有尚未被 commit/release 的 reserve fact。恢复入口不得依赖调用方进程内 lease：即使调用方日志在 reserve 后丢失，C11/C08 也必须先列出这些 reservation，结合对应 started/operation journal 决定保守 commit 或仅在确认未开始时 release。
+
 reserve 到达软阈值时仍提交，但 entry 固化 `admission = warn` 与 `warningDimensions`；到达现有硬限或请求会超过硬限时不写 entry 并返回 `budget_hard_limit`。commit/adjust 记录已经发生的真实或保守 usage，即使它使快照超限也不能丢弃事实，后续 reserve 会被硬门阻止。
+
+每个 snapshot 固化 `limitStatus/limitDimensions`，因此 commit/adjust 导致的实际超限不需要下游自行重算。费用一旦 unknown，会以 `pricing_unknown` 阻止新的付费调用；恢复必须追加带 `resolvedCostUsd`（累计已提交费用）、`known|partial`、稳定 pricingVersion 和非空 reason 的 cost reconciliation adjustment。该事实可以替换累计费用可信状态、推进 account/snapshot 的 pricingVersion，但不会改写旧 commit。C11 正常路径必须使用版本化本地定价表，DeepSeek provider 的 `costUsd = null` 不能未经本地计价就直接作为最终结算；定价仍不可得时保持阻断而不是伪造 0。
 
 ## 4. 功能需求
 
@@ -114,7 +121,7 @@ reserve 到达软阈值时仍提交，但 entry 固化 `admission = warn` 与 `w
 - 预留成功但操作未开始时可释放；操作开始后由完成/失败结算。
 - 预算状态从事件或 usage ledger 恢复，不能只存在内存计数器。
 - C08 工具开始边界中的 reservation 与批准消费、operation 状态、`tool.started` 同事务；模型调用 reservation 则与 `model.started` 同事务。
-- `SqliteBudgetLedger` 的普通异步方法自行使用 `BEGIN IMMEDIATE`；`reserveWithinTransaction/commitWithinTransaction/releaseWithinTransaction/adjustWithinTransaction` 只加入调用方已经打开的事务，事务体不跨 `await`。C08/C11 journal 必须使用后一组同步原语。
+- `SqliteBudgetLedger` 的普通异步方法自行使用 `BEGIN IMMEDIATE`；`reserveWithinTransaction/commitWithinTransaction/releaseWithinTransaction/adjustWithinTransaction` 只加入 `SqliteStorageDatabase.runImmediateTransaction()` 已打开的事务。任意普通/DEFERRED transaction 会被拒绝，事务体不得跨 `await`。C08/C11 journal 必须使用后一组同步原语。
 - v3 migration 在 `budget_accounts` 保存 policy/watermark，在 `usage_entries` 保存 canonical ledger fact、hash、索引列和首次结果快照；当前快照总是从 ledger 重放并核验连续 sequence 与 account watermark，不信任内存计数器。
 
 ## 6. 错误与恢复
@@ -146,7 +153,7 @@ reserve 到达软阈值时仍提交，但 entry 固化 `admission = warn` 与 `w
 已交付证据：
 
 - `budget-controller.test.ts` 覆盖八维软/硬门、unknown 费用、UNKNOWN 禁止自动重试、相同失败的首末证据与单调活动/等待计时。
-- `sqlite-budget-ledger.test.ts` 覆盖 policy 初始化冲突、预留/实际结算、缺失 usage 保守结算、未开始释放、跨连接竞争、重启重放、篡改拒绝、加入上游事务及整体回滚。
+- `sqlite-budget-ledger.test.ts` 覆盖 policy 初始化冲突、预留/实际结算、未结算 reservation 恢复、缺失 usage 保守结算、unknown cost 阻断与审计 reconciliation、未开始释放、跨连接持锁竞争、二次结算/mismatch/entry ID 冲突、重启后 mutation 回放、水位/索引篡改拒绝、加入 IMMEDIATE 上游事务及整体回滚。
 - `state-reducer-contract.test.ts` 用同一 `BudgetSnapshot` 重放 10,000 个 `budget.updated`，证明批量与增量投影一致。
 - `BUDGET-AC-005` 的实时 UI 延迟属于 C13 集成验收；C04 已提供持久 snapshot/event payload 契约，不以空 CLI 实现提前宣称完成。
 

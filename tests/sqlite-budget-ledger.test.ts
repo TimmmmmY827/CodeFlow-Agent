@@ -65,6 +65,7 @@ describe("SqliteBudgetLedger", () => {
     };
     const reserved = await ledger.reserve(reserveInput);
     expect(reserved.snapshot.reserved).toMatchObject({ steps: 1, inputTokens: 200, costUsd: 0.2 });
+    expect(await ledger.listOpenReservations(sessionId)).toEqual([reserved.entry]);
     expect(await ledger.reserve(reserveInput)).toEqual({ ...reserved, status: "duplicate" });
     await expect(ledger.reserve({ ...reserveInput, entryId: randomUUID(), delta: budgetDeltaSchema.parse({ steps: 2 }) }))
       .rejects.toMatchObject({ details: { category: "budget_idempotency_conflict" } });
@@ -82,6 +83,7 @@ describe("SqliteBudgetLedger", () => {
       reserved: { steps: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 },
       lastLedgerSequence: 1,
     });
+    expect(await ledger.listOpenReservations(sessionId)).toEqual([]);
   });
 
   it("settles missing provider usage conservatively and releases only unstarted work", async () => {
@@ -113,7 +115,7 @@ describe("SqliteBudgetLedger", () => {
     expect(released.snapshot.reserved.toolCalls).toBe(0);
   });
 
-  it("serializes competing reservations so the hard limit cannot be over-reserved", async () => {
+  it("applies competing reservations without exceeding the hard limit", async () => {
     const databasePath = temporaryDatabasePath();
     using firstStorage = new SqliteStorageDatabase(databasePath, { clock, busyTimeoutMs: 100 });
     const sessionId = seedSession(firstStorage);
@@ -137,23 +139,56 @@ describe("SqliteBudgetLedger", () => {
     });
   });
 
+  it("holds BEGIN IMMEDIATE across a journal callback so another connection cannot interleave", async () => {
+    const databasePath = temporaryDatabasePath();
+    using firstStorage = new SqliteStorageDatabase(databasePath, { clock, busyTimeoutMs: 5 });
+    const sessionId = seedSession(firstStorage);
+    const first = new SqliteBudgetLedger(firstStorage);
+    await first.initialize({ sessionId, policy, pricingVersion: "pricing:test" });
+    using secondStorage = new SqliteStorageDatabase(databasePath, { clock, busyTimeoutMs: 5 });
+    const second = new SqliteBudgetLedger(secondStorage);
+    const firstInput = {
+      entryId: randomUUID(), sessionId, operationId: randomUUID(), idempotencyKey: "locked:first",
+      delta: budgetDeltaSchema.parse({ toolCalls: 1 }),
+    };
+    const secondInput = {
+      entryId: randomUUID(), sessionId, operationId: randomUUID(), idempotencyKey: "locked:second",
+      delta: budgetDeltaSchema.parse({ toolCalls: 1 }),
+    };
+    let blocked: Promise<unknown> | undefined;
+
+    firstStorage.runImmediateTransaction(() => {
+      first.reserveWithinTransaction(firstInput);
+      blocked = second.reserve(secondInput);
+    });
+
+    await expect(blocked).rejects.toMatchObject({ details: { category: "storage_busy", retryable: true } });
+    await expect(second.reserve(secondInput)).resolves.toMatchObject({ status: "inserted" });
+    await expect(first.reserve({
+      entryId: randomUUID(), sessionId, operationId: randomUUID(), idempotencyKey: "locked:third",
+      delta: budgetDeltaSchema.parse({ toolCalls: 1 }),
+    })).rejects.toMatchObject({ details: { category: "budget_hard_limit" } });
+  });
+
   it("replays the same snapshot after reopening and fails closed on tampering", async () => {
     const databasePath = temporaryDatabasePath();
     const sessionId = randomUUID();
     let expected;
+    const replayInput = {
+      entryId: randomUUID(), sessionId, operationId: randomUUID(), idempotencyKey: "replay:1",
+      delta: budgetDeltaSchema.parse({ retries: 1, activeDurationMs: 25 }),
+    };
     {
       using storage = new SqliteStorageDatabase(databasePath, { clock });
       seedSession(storage, sessionId);
       const ledger = new SqliteBudgetLedger(storage);
       await ledger.initialize({ sessionId, policy, pricingVersion: "pricing:test" });
-      expected = (await ledger.adjust({
-        entryId: randomUUID(), sessionId, operationId: randomUUID(), idempotencyKey: "replay:1",
-        delta: budgetDeltaSchema.parse({ retries: 1, activeDurationMs: 25 }),
-      })).snapshot;
+      expected = await ledger.adjust(replayInput);
     }
     using reopened = new SqliteStorageDatabase(databasePath, { clock });
     const recovered = new SqliteBudgetLedger(reopened);
-    expect(await recovered.getSnapshot(sessionId)).toEqual(expected);
+    expect(await recovered.getSnapshot(sessionId)).toEqual(expected.snapshot);
+    expect(await recovered.adjust(replayInput)).toEqual({ ...expected, status: "duplicate" });
     reopened.database.prepare("UPDATE usage_entries SET entry_kind = 'release' WHERE session_id = ?").run(sessionId);
     await expect(recovered.getSnapshot(sessionId)).rejects.toMatchObject({ details: { category: "budget_storage_corrupt" } });
   });
@@ -164,17 +199,28 @@ describe("SqliteBudgetLedger", () => {
     const ledger = new SqliteBudgetLedger(storage);
     await ledger.initialize({ sessionId, policy, pricingVersion: "pricing:test" });
     storage.database.exec("BEGIN");
-    ledger.reserveWithinTransaction({
-      entryId: randomUUID(),
-      sessionId,
-      operationId: randomUUID(),
-      idempotencyKey: "journal:reserve",
+    expect(() => ledger.reserveWithinTransaction({
+      entryId: randomUUID(), sessionId, operationId: randomUUID(), idempotencyKey: "journal:deferred",
       delta: budgetDeltaSchema.parse({ toolCalls: 1 }),
-    });
+    })).toThrowError(expect.objectContaining({ details: expect.objectContaining({ category: "budget_transaction_required" }) }));
     storage.database.exec("ROLLBACK");
+    expect(() => storage.runImmediateTransaction(() => {
+      ledger.reserveWithinTransaction({
+        entryId: randomUUID(),
+        sessionId,
+        operationId: randomUUID(),
+        idempotencyKey: "journal:reserve",
+        delta: budgetDeltaSchema.parse({ toolCalls: 1 }),
+      });
+      throw new Error("journal fault after budget reservation");
+    })).toThrow("journal fault");
 
     expect(await ledger.listEntries(sessionId)).toEqual([]);
     expect(await ledger.getSnapshot(sessionId)).toMatchObject({ lastLedgerSequence: -1, reserved: { toolCalls: 0 } });
+    expect(() => ledger.reserveWithinTransaction({
+      entryId: randomUUID(), sessionId, operationId: randomUUID(), idempotencyKey: "journal:missing",
+      delta: budgetDeltaSchema.parse({ toolCalls: 1 }),
+    })).toThrowError(expect.objectContaining({ details: expect.objectContaining({ category: "budget_transaction_required" }) }));
   });
 
   it("replays partial and unknown cost without coercing either to zero and preserves evidence", async () => {
@@ -210,8 +256,37 @@ describe("SqliteBudgetLedger", () => {
       actual: budgetDeltaSchema.parse({ inputTokens: 9, costUsd: null, costStatus: "unknown" }),
     });
 
-    expect(result.snapshot.usage).toMatchObject({ costUsd: null, costStatus: "unknown" });
-    expect(await ledger.getSnapshot(sessionId)).toEqual(result.snapshot);
+    expect(result.snapshot).toMatchObject({
+      usage: { costUsd: null, costStatus: "unknown" },
+      limitStatus: "pricing_unknown",
+      limitDimensions: expect.arrayContaining(["costUsd"]),
+    });
+    await expect(ledger.reserve({
+      entryId: randomUUID(), sessionId, operationId: randomUUID(), idempotencyKey: "unknown:blocked",
+      delta: budgetDeltaSchema.parse({ inputTokens: 1, costUsd: 0.01 }),
+    })).rejects.toMatchObject({ details: { category: "pricing_unknown" } });
+    const reconciled = await ledger.adjust({
+      entryId: randomUUID(), sessionId, operationId: randomUUID(), idempotencyKey: "unknown:reconcile",
+      delta: budgetDeltaSchema.parse({}),
+      costReconciliation: {
+        resolvedCostUsd: 0.19,
+        costStatus: "known",
+        pricingVersion: "pricing:reconciled",
+        reason: "Recomputed cumulative cost from the versioned local pricing table.",
+      },
+    });
+    expect(reconciled.snapshot).toMatchObject({
+      usage: { costUsd: 0.19, costStatus: "known" },
+      limitStatus: "within",
+      pricingVersion: "pricing:reconciled",
+    });
+    await expect(ledger.reserve({
+      entryId: randomUUID(), sessionId, operationId: randomUUID(), idempotencyKey: "unknown:unblocked",
+      delta: budgetDeltaSchema.parse({ inputTokens: 1, costUsd: 0.01 }),
+    })).resolves.toMatchObject({ status: "inserted" });
+    expect(await ledger.getSnapshot(sessionId)).toEqual(expect.objectContaining({
+      usage: expect.objectContaining({ costUsd: 0.19, costStatus: "known" }),
+    }));
     expect(await ledger.listEntries(sessionId)).toEqual(expect.arrayContaining([
       expect.objectContaining({ evidence: expect.objectContaining({
         kind: "no_progress",
@@ -219,6 +294,57 @@ describe("SqliteBudgetLedger", () => {
         lastObservationId: observationId,
       }) }),
     ]));
+  });
+
+  it("rejects reservation identity conflicts and a second settlement", async () => {
+    using storage = createStorage();
+    const sessionId = seedSession(storage);
+    const ledger = new SqliteBudgetLedger(storage);
+    await ledger.initialize({ sessionId, policy, pricingVersion: "pricing:test" });
+    const operationId = randomUUID();
+    const reservation = await ledger.reserve({
+      entryId: randomUUID(), sessionId, operationId, idempotencyKey: "conflict:reserve",
+      delta: budgetDeltaSchema.parse({ toolCalls: 1 }),
+    });
+    await expect(ledger.commit({
+      entryId: randomUUID(), sessionId, operationId: randomUUID(), idempotencyKey: "conflict:mismatch",
+      reservationId: reservation.entry.entryId, actual: budgetDeltaSchema.parse({ toolCalls: 1 }),
+    })).rejects.toMatchObject({ details: { category: "budget_reservation_mismatch" } });
+    await ledger.commit({
+      entryId: randomUUID(), sessionId, operationId, idempotencyKey: "conflict:commit",
+      reservationId: reservation.entry.entryId, actual: budgetDeltaSchema.parse({ toolCalls: 1 }),
+    });
+    await expect(ledger.release({
+      entryId: randomUUID(), sessionId, operationId, idempotencyKey: "conflict:release",
+      reservationId: reservation.entry.entryId, operationStarted: false,
+    })).rejects.toMatchObject({ details: { category: "budget_reservation_settled" } });
+    await expect(ledger.reserve({
+      entryId: reservation.entry.entryId, sessionId, operationId: randomUUID(), idempotencyKey: "conflict:entry-id",
+      delta: budgetDeltaSchema.parse({ toolCalls: 1 }),
+    })).rejects.toMatchObject({ details: { category: "budget_entry_id_conflict" } });
+  });
+
+  it("marks actual provider overrun as a hard-limit snapshot and detects watermark tampering", async () => {
+    using storage = createStorage();
+    const sessionId = seedSession(storage);
+    const ledger = new SqliteBudgetLedger(storage);
+    await ledger.initialize({ sessionId, policy, pricingVersion: "pricing:test" });
+    const operationId = randomUUID();
+    const reservation = await ledger.reserve({
+      entryId: randomUUID(), sessionId, operationId, idempotencyKey: "overrun:reserve",
+      delta: budgetDeltaSchema.parse({ inputTokens: 100, costUsd: 0.1 }),
+    });
+    const committed = await ledger.commit({
+      entryId: randomUUID(), sessionId, operationId, idempotencyKey: "overrun:commit",
+      reservationId: reservation.entry.entryId,
+      actual: budgetDeltaSchema.parse({ inputTokens: 1_100, costUsd: 0.2 }),
+    });
+    expect(committed.snapshot).toMatchObject({
+      limitStatus: "hard_limit",
+      limitDimensions: expect.arrayContaining(["inputTokens"]),
+    });
+    storage.database.prepare("UPDATE budget_accounts SET last_ledger_sequence = 9 WHERE session_id = ?").run(sessionId);
+    await expect(ledger.getSnapshot(sessionId)).rejects.toMatchObject({ details: { category: "budget_storage_corrupt" } });
   });
 });
 

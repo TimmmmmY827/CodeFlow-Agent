@@ -117,7 +117,7 @@ interface EvaluationRun {
 }
 ```
 
-`limits` 和 `budget` 必须直接导入 C04 类型。成本门只读取 `BudgetSnapshot.usage.costUsd/costStatus`：known 才可形成完整成本指标，partial/unknown 均使正式发布成本门为 unknown；`reserved` 非零表示仍有未结算调用，也必须阻断结果成为可发布样本。
+`limits` 和 `budget` 必须直接导入 C04 类型。成本门只读取 `BudgetSnapshot.usage.costUsd/costStatus`：known 才可形成完整成本指标，partial/unknown 均使正式发布成本门为 unknown；`limitStatus` 为 hard/pricing_unknown 或 `reserved` 非零表示超限/仍有未结算调用，也必须阻断结果成为可发布样本。
 
 任务版本或验证器变化后不能直接与旧 run 横向比较。
 

@@ -257,6 +257,8 @@ function budgetSnapshot(sessionId: string, steps: number, sequence: number): Bud
     pricingVersion: "pricing:test",
     countWaitingTime: false,
     softLimitRatio: 0.8,
+    limitStatus: "within",
+    limitDimensions: [],
     updatedAt: "2026-08-15T00:00:00.000Z",
     lastLedgerSequence: sequence,
   };

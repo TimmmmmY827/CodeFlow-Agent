@@ -65,6 +65,7 @@ export {
   DEFAULT_BUDGET_POLICY,
   ZERO_BUDGET_USAGE,
   budgetDeltaSchema,
+  budgetCostReconciliationSchema,
   budgetEvidenceSchema,
   budgetLedgerEntrySchema,
   budgetLimitsSchema,
@@ -76,6 +77,7 @@ export {
 export type {
   AdjustBudgetInput,
   BudgetDelta,
+  BudgetCostReconciliation,
   BudgetEvidence,
   BudgetLedger,
   BudgetLedgerEntry,

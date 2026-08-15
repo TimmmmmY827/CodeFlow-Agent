@@ -83,6 +83,15 @@ export const budgetPolicySchema = z.object({
 });
 export type BudgetPolicy = z.infer<typeof budgetPolicySchema>;
 
+export const budgetCostReconciliationSchema = z.object({
+  /** Authoritative cumulative committed cost after reconciliation. */
+  resolvedCostUsd: amountSchema,
+  costStatus: z.enum(["known", "partial"]),
+  pricingVersion: versionIdentifierSchema,
+  reason: z.string().trim().min(1).max(1_024),
+});
+export type BudgetCostReconciliation = z.infer<typeof budgetCostReconciliationSchema>;
+
 /** Central fallback used until C12 supplies the validated application config. */
 export const DEFAULT_BUDGET_POLICY: BudgetPolicy = Object.freeze({
   limits: {
@@ -108,6 +117,17 @@ export const budgetSnapshotSchema = z.object({
   pricingVersion: versionIdentifierSchema.nullable(),
   countWaitingTime: z.boolean(),
   softLimitRatio: z.number().positive().max(1),
+  limitStatus: z.enum(["within", "soft_limit", "hard_limit", "pricing_unknown"]),
+  limitDimensions: z.array(z.enum([
+    "steps",
+    "toolCalls",
+    "durationMs",
+    "inputTokens",
+    "outputTokens",
+    "costUsd",
+    "retries",
+    "noProgressCycles",
+  ])),
   updatedAt: utcTimestampSchema,
   lastLedgerSequence: z.number().int().min(-1),
 });
@@ -154,6 +174,7 @@ export const budgetLedgerEntrySchema = z.object({
     "retries",
     "noProgressCycles",
   ])),
+  costReconciliation: budgetCostReconciliationSchema.nullable(),
   reconciliationRequired: z.boolean(),
   evidence: budgetEvidenceSchema.nullable(),
   createdAt: utcTimestampSchema,
@@ -193,6 +214,7 @@ export interface ReleaseBudgetInput extends BudgetMutationInput {
 export interface AdjustBudgetInput extends BudgetMutationInput {
   readonly delta: BudgetDelta;
   readonly evidence?: BudgetEvidence | null;
+  readonly costReconciliation?: BudgetCostReconciliation | null;
 }
 
 export interface BudgetMutationResult {
@@ -206,6 +228,7 @@ export interface BudgetLedger {
   initialize(input: InitializeBudgetInput): Promise<BudgetSnapshot>;
   getSnapshot(sessionId: StableId): Promise<BudgetSnapshot | null>;
   listEntries(sessionId: StableId): Promise<readonly BudgetLedgerEntry[]>;
+  listOpenReservations(sessionId: StableId): Promise<readonly BudgetLedgerEntry[]>;
   reserve(input: ReserveBudgetInput): Promise<BudgetMutationResult>;
   commit(input: CommitBudgetInput): Promise<BudgetMutationResult>;
   release(input: ReleaseBudgetInput): Promise<BudgetMutationResult>;

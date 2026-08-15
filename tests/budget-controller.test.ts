@@ -125,6 +125,8 @@ function createSnapshot(overrides: Partial<Pick<BudgetSnapshot, "usage" | "reser
     pricingVersion: "pricing:test",
     countWaitingTime: policy.countWaitingTime,
     softLimitRatio: policy.softLimitRatio,
+    limitStatus: "within",
+    limitDimensions: [],
     updatedAt: "2026-08-15T00:00:00.000Z",
     lastLedgerSequence: -1,
   };

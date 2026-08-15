@@ -63,7 +63,7 @@ interface CliRecord {
 - 模型/工具调用树：名称、状态、耗时、重试、错误。
 - 读取/修改文件、diff 摘要和 codeVersion。
 - 验证证据与 `COMPLETION_CLAIMED`/`VERIFIED` 区别。
-- 直接从 C01 `SessionView.budget` 的 C04 `BudgetSnapshot` 展示 committed/reserved、八维上限与剩余量；费用同时显示 known/partial/unknown，unknown 不得格式化成 `$0`。活动时间与等待时间分列，并按 `countWaitingTime` 说明哪个值计入硬限。
+- 直接从 C01 `SessionView.budget` 的 C04 `BudgetSnapshot` 展示 committed/reserved、八维上限与剩余量，以及持久化的 `limitStatus/limitDimensions`；费用同时显示 known/partial/unknown，unknown 不得格式化成 `$0`。活动时间与等待时间分列，并按 `countWaitingTime` 说明哪个值计入硬限。存在 open reservation 时显示恢复中/未结算，不把 reserved 当作已消费或可用余额。
 - WAITING_USER、WAITING_APPROVAL、UNKNOWN、取消状态。
 
 默认折叠成功的低价值细节，保留首次错误和所有安全事件。用户可展开 Artifact。

@@ -118,7 +118,7 @@ Continuation handle 只引用 C14 敏感 transcript 中的 provider blob；普�
 - `MODEL-FR-008`：Adapter 暴露能力矩阵，不支持的参数在请求前拒绝或显式降级。
 - `MODEL-FR-009`：Adapter 的一次 `stream` 调用只对应一个供应商业务 attempt，不自行执行完整请求重试；它返回稳定 retry advice，由 C11 在 C04 `maxRetriesPerOperation` 内决定是否创建下一 attempt。模型策略默认上限可为 2，但有效上限必须取模型策略与 C04 用户预算中的更小值，不能在 Adapter 内独立计数。
 - `MODEL-FR-010`：只有 `response.completed` 且 tool call 参数全部 completed 时聚合结果才是 complete；断流后的文本、tool call 和 usage 分别标记完整性，不能合并成伪造成功。
-- `MODEL-FR-011`：partial/final usage 使用 modelCallId+attempt 幂等结算；未知价格保持 `costUsd=null`，后续重新计价必须记录 pricing version 和 adjustment。
+- `MODEL-FR-011`：partial/final usage 使用 modelCallId+attempt 幂等结算；Adapter 未知价格保持 `costUsd=null`，C11 必须优先用版本化本地定价表计算结算费用。仍未知时 C04 snapshot 进入 `pricing_unknown` 并阻断新付费调用；后续重新计价必须追加含累计费用、pricing version 和 reason 的审计 adjustment，不能覆盖旧 usage。
 
 ## 6. DeepSeek 配置
 

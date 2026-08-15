@@ -5,6 +5,7 @@ import {
   BudgetError,
   ZERO_BUDGET_USAGE,
   budgetDeltaSchema,
+  budgetCostReconciliationSchema,
   budgetEvidenceSchema,
   budgetLedgerEntrySchema,
   budgetPolicySchema,
@@ -105,18 +106,9 @@ INSERT INTO budget_accounts(
           now,
           now,
         );
-      return budgetSnapshotSchema.parse({
-        schemaVersion: BUDGET_SCHEMA_VERSION,
-        sessionId: checked.sessionId,
-        usage: ZERO_BUDGET_USAGE,
-        reserved: ZERO_BUDGET_USAGE,
-        limits: checked.policy.limits,
-        pricingVersion: checked.pricingVersion,
-        countWaitingTime: checked.policy.countWaitingTime,
-        softLimitRatio: checked.policy.softLimitRatio,
-        updatedAt: now,
-        lastLedgerSequence: -1,
-      });
+      const created = this.#loadAccount(checked.sessionId);
+      if (!created) throw corruptLedger("The initialized budget account could not be reloaded.");
+      return this.#project(decodeAccount(created));
     });
   }
 
@@ -137,6 +129,22 @@ INSERT INTO budget_accounts(
       if (!account) return [];
       const decoded = decodeAccount(account);
       return this.#loadEntries(checkedId, decoded.lastLedgerSequence);
+    } catch (error: unknown) {
+      throw translateBudgetError(error);
+    }
+  }
+
+  async listOpenReservations(sessionId: StableId): Promise<readonly BudgetLedgerEntry[]> {
+    const checkedId = parseSessionId(sessionId);
+    try {
+      const accountRow = this.#loadAccount(checkedId);
+      if (!accountRow) return [];
+      const account = decodeAccount(accountRow);
+      this.#project(account);
+      const entries = this.#loadEntries(checkedId, account.lastLedgerSequence);
+      const resolved = new Set(entries.flatMap((entry) =>
+        entry.reservationId === null ? [] : [entry.reservationId]));
+      return entries.filter((entry) => entry.kind === "reserve" && !resolved.has(entry.entryId));
     } catch (error: unknown) {
       throw translateBudgetError(error);
     }
@@ -164,12 +172,12 @@ INSERT INTO budget_accounts(
 
   /** C08 uses this only after opening its execution transaction. */
   reserveWithinTransaction(input: ReserveBudgetInput): BudgetMutationResult {
-    if (!this.storage.database.isTransaction) {
+    if (!this.storage.isImmediateTransactionActive) {
       throw budgetFailure(
         "budget_transaction_required",
-        "Budget reservation requires an active execution transaction.",
+        "Budget reservation requires an active BEGIN IMMEDIATE execution transaction.",
         false,
-        "Open the execution transaction before reserving budget.",
+        "Use SqliteStorageDatabase.runImmediateTransaction before reserving budget.",
       );
     }
     const checked = validateReserve(input);
@@ -228,12 +236,12 @@ INSERT INTO budget_accounts(
   }
 
   #withinExistingTransaction<T>(operation: () => T): T {
-    if (!this.storage.database.isTransaction) {
+    if (!this.storage.isImmediateTransactionActive) {
       throw budgetFailure(
         "budget_transaction_required",
-        "The budget mutation requires an active execution transaction.",
+        "The budget mutation requires an active BEGIN IMMEDIATE execution transaction.",
         false,
-        "Open the C08/C11 journal transaction before mutating budget.",
+        "Use SqliteStorageDatabase.runImmediateTransaction for the C08/C11 journal boundary.",
       );
     }
     try {
@@ -285,6 +293,17 @@ INSERT INTO budget_accounts(
       admission = decision.outcome === "warn" ? "warn" : "allow";
       warningDimensions = decision.violations.map((violation) => violation.dimension);
     }
+    const costReconciliation = kind === "adjust"
+      ? (input as AdjustBudgetInput).costReconciliation ?? null
+      : null;
+    if (costReconciliation !== null && current.usage.costStatus === "known") {
+      throw budgetFailure(
+        "budget_cost_reconciliation_invalid",
+        "Cost reconciliation is only valid while committed cost is partial or unknown.",
+        false,
+        "Use ordinary usage adjustments while the cumulative cost is already known.",
+      );
+    }
     const createdAt = this.storage.clock.utcNow();
     const entry = budgetLedgerEntrySchema.parse({
       schemaVersion: BUDGET_SCHEMA_VERSION,
@@ -299,6 +318,7 @@ INSERT INTO budget_accounts(
       usageBasis,
       admission,
       warningDimensions,
+      costReconciliation,
       reconciliationRequired,
       evidence,
       createdAt,
@@ -325,15 +345,28 @@ INSERT INTO usage_entries(
         requestHash,
         sha256(entryJson),
       );
+    const nextPricingVersion = costReconciliation?.pricingVersion ?? account.pricingVersion;
     const updated = this.storage.database.prepare(`
 UPDATE budget_accounts
-SET last_ledger_sequence = ?, updated_at = ?
+SET last_ledger_sequence = ?, updated_at = ?, pricing_version = ?, policy_hash = ?
 WHERE session_id = ? AND last_ledger_sequence = ?`)
-      .run(entry.ledgerSequence, createdAt, entry.sessionId, account.lastLedgerSequence);
+      .run(
+        entry.ledgerSequence,
+        createdAt,
+        nextPricingVersion,
+        accountHash(account.policy, nextPricingVersion),
+        entry.sessionId,
+        account.lastLedgerSequence,
+      );
     if (updated.changes !== 1) {
       throw budgetFailure("budget_state_conflict", "The budget ledger changed concurrently.", true, "Reload the durable budget snapshot and retry with the same idempotency key.");
     }
-    const nextAccount = { ...account, lastLedgerSequence: entry.ledgerSequence, updatedAt: createdAt };
+    const nextAccount = {
+      ...account,
+      pricingVersion: nextPricingVersion,
+      lastLedgerSequence: entry.ledgerSequence,
+      updatedAt: createdAt,
+    };
     const snapshot = this.#project(nextAccount, true);
     const snapshotJson = canonicalJson(snapshot);
     const result = this.storage.database.prepare(`
@@ -409,10 +442,17 @@ ORDER BY ledger_sequence LIMIT 1`)
         if (!entry.reservationId || !reservations.delete(entry.reservationId)) throw corruptLedger("A release does not resolve an open reservation.");
       }
       if (entry.kind === "adjust") usage = addUsage(usage, entry.delta);
+      if (entry.kind === "adjust" && entry.costReconciliation !== null) {
+        usage = {
+          ...usage,
+          costUsd: entry.costReconciliation.resolvedCostUsd,
+          costStatus: entry.costReconciliation.costStatus,
+        };
+      }
     }
     let reserved: BudgetUsage = ZERO_BUDGET_USAGE;
     for (const delta of reservations.values()) reserved = addUsage(reserved, delta);
-    return budgetSnapshotSchema.parse({
+    const provisional = budgetSnapshotSchema.parse({
       schemaVersion: BUDGET_SCHEMA_VERSION,
       sessionId: account.sessionId,
       usage,
@@ -421,8 +461,23 @@ ORDER BY ledger_sequence LIMIT 1`)
       pricingVersion: account.pricingVersion,
       countWaitingTime: account.policy.countWaitingTime,
       softLimitRatio: account.policy.softLimitRatio,
+      limitStatus: "within",
+      limitDimensions: [],
       updatedAt: account.updatedAt,
       lastLedgerSequence: account.lastLedgerSequence,
+    });
+    const decision = new BudgetController(account.policy).evaluate(provisional);
+    const limitStatus = decision.violations.some((violation) => violation.category === "pricing_unknown")
+      ? "pricing_unknown"
+      : decision.outcome === "deny"
+      ? "hard_limit"
+      : decision.outcome === "warn"
+      ? "soft_limit"
+      : "within";
+    return budgetSnapshotSchema.parse({
+      ...provisional,
+      limitStatus,
+      limitDimensions: decision.violations.map((violation) => violation.dimension),
     });
   }
 
@@ -581,8 +636,19 @@ function validateAdjust(input: AdjustBudgetInput): AdjustBudgetInput {
   const delta = budgetDeltaSchema.safeParse(input.delta);
   if (!delta.success) throw invalidRequest();
   const evidence = input.evidence === undefined || input.evidence === null ? null : budgetEvidenceSchema.safeParse(input.evidence);
-  if (evidence !== null && !evidence.success) throw invalidRequest();
-  return { ...common, delta: delta.data, evidence: evidence === null ? null : evidence.data };
+  const costReconciliation = input.costReconciliation === undefined || input.costReconciliation === null
+    ? null
+    : budgetCostReconciliationSchema.safeParse(input.costReconciliation);
+  if (
+    (evidence !== null && !evidence.success) ||
+    (costReconciliation !== null && !costReconciliation.success)
+  ) throw invalidRequest();
+  return {
+    ...common,
+    delta: delta.data,
+    evidence: evidence === null ? null : evidence.data,
+    costReconciliation: costReconciliation === null ? null : costReconciliation.data,
+  };
 }
 
 function validateMutation(input: ReserveBudgetInput | CommitBudgetInput | ReleaseBudgetInput | AdjustBudgetInput) {
@@ -625,7 +691,12 @@ function requestHashFromEntry(entry: BudgetLedgerEntry): string {
       if (!entry.reservationId) throw corruptLedger("A release is missing its reservation identity.");
       return mutationRequestHash({ ...common, reservationId: entry.reservationId, operationStarted: false }, "release");
     case "adjust":
-      return mutationRequestHash({ ...common, delta: entry.delta, evidence: entry.evidence }, "adjust");
+      return mutationRequestHash({
+        ...common,
+        delta: entry.delta,
+        evidence: entry.evidence,
+        costReconciliation: entry.costReconciliation,
+      }, "adjust");
   }
 }
 

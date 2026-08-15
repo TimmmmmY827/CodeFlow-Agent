@@ -265,6 +265,18 @@ INSERT INTO approvals(
     })).toThrowError(RangeError);
   });
 
+  it("rejects async and nested callbacks in the immediate transaction host", async () => {
+    using storage = new SqliteStorageDatabase(":memory:", { clock });
+    expect(() => storage.runImmediateTransaction(async () => Promise.resolve(1))).toThrowError(
+      expect.objectContaining({ details: expect.objectContaining({ category: "storage_async_transaction_forbidden" }) }),
+    );
+    expect(storage.database.isTransaction).toBe(false);
+    expect(() => storage.runImmediateTransaction(() => storage.runImmediateTransaction(() => 1))).toThrowError(
+      expect.objectContaining({ details: expect.objectContaining({ category: "storage_transaction_nested" }) }),
+    );
+    expect(storage.database.isTransaction).toBe(false);
+  });
+
   it("rolls back every statement and migration record when a migration fails", () => {
     using database = new DatabaseSync(":memory:");
     let createCount = 0;
