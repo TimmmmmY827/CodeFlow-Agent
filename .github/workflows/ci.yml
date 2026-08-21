@@ -20,5 +20,12 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+      - run: pnpm eval:fixtures -- self-test

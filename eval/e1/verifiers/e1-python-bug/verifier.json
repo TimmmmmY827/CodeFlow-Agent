@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "executable": "python",
+  "args": ["-m", "unittest", "discover", "-s", "_codeflow_hidden", "-p", "test_*.py"],
+  "timeoutMs": 30000
+}

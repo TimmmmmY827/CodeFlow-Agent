@@ -42,7 +42,7 @@
 | C12 | [Application Service](12-application-service.md) | D3–D7 | 单次只读生产 runner + replay-tail source | C02–C11 | CLI、Session 命令、Eval |
 | C13 | [CLI/TUI 与 HITL](13-cli-tui.md) | D5 | `run` 已接实时只读任务树；resume/HITL 延期 | C01、C03、C04、C11、C12、C14 | 用户、Eval |
 | C14 | [Session、Trace 与生命周期治理](14-session-trace.md) | D7 | 接口/脱敏骨架 | C01、C02、C03、C12 | CLI、Eval、恢复 |
-| C15 | [Evaluation Harness](15-evaluation.md) | D8–D10 | 类型和总门槛 | C01–C14 | 发布决策 |
+| C15 | [Evaluation Harness](15-evaluation.md) | D8–D10 | Issue #7 E1 六任务 fixture、可信重置与隐藏 verifier 已实现；Runner/报告/发布门延期 | C01–C14 | 发布决策 |
 
 ## 总体依赖图
 

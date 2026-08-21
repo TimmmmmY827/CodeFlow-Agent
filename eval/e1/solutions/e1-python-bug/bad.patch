@@ -1,0 +1,12 @@
+diff --git a/inventory.py b/inventory.py
+--- a/inventory.py
++++ b/inventory.py
+@@ -1,3 +1,7 @@
+ def available_stock(stock: dict[str, int], reserved: dict[str, int]) -> dict[str, int]:
+     """Return available quantities for every SKU in stock."""
+-    return {sku: count - reserved.get(sku, 0) for sku, count in stock.items()}
++    return {
++        sku: max(0, count - reserved.get(sku, 0)) if sku == "pen"
++        else count - reserved.get(sku, 0)
++        for sku, count in stock.items()
++    }
