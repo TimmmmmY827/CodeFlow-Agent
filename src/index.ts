@@ -8,6 +8,22 @@ export type {
 } from "./agent/agent-event-loop.js";
 export { createApplication } from "./app/application.js";
 export {
+  READONLY_MVP_BUDGET_POLICY,
+  startProductionReadonlySession,
+  startReadonlySession,
+} from "./app/readonly-session-runner.js";
+export type {
+  ProductionReadonlySessionOptions,
+  ReadonlySessionRunnerDependencies,
+  RunningReadonlySession,
+  StartReadonlySessionRequest,
+} from "./app/readonly-session-runner.js";
+export {
+  ReplayTailSessionEventSource,
+  SessionEventStreamError,
+} from "./app/session-event-source.js";
+export type { ReplayTailSessionEventSourceOptions } from "./app/session-event-source.js";
+export {
   LiveSessionTaskTree,
   SessionTaskTree,
   buildSessionTaskTreeLines,

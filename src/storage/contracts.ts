@@ -18,6 +18,10 @@ export interface WorkspaceRecord {
   readonly createdAt: UtcTimestamp;
 }
 
+export interface WorkspaceRepository {
+  getByNormalizedPath(normalizedPath: string): Promise<WorkspaceRecord | null>;
+}
+
 export interface CreateSessionRecord {
   readonly schemaVersion: typeof STORAGE_RECORD_SCHEMA_VERSION;
   readonly sessionId: StableId;

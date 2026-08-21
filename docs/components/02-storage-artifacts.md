@@ -76,6 +76,11 @@ interface WorkspaceRecord {
   createdAt: UtcTimestamp;
 }
 
+interface WorkspaceRepository {
+  // 只读身份查询；Workspace 仍只随 CreateSessionBundle 原子创建。
+  getByNormalizedPath(normalizedPath: string): Promise<WorkspaceRecord | null>;
+}
+
 interface CreateSessionRecord {
   schemaVersion: number;
   sessionId: StableId;

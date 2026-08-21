@@ -67,7 +67,7 @@ const gitLogInputSchema = z.object({
   }
 });
 
-const IGNORED_DIRECTORIES = new Set([".git", "node_modules", "dist", "artifacts"]);
+const IGNORED_DIRECTORIES = new Set([".git", ".codeflow", "node_modules", "dist", "artifacts"]);
 const SEARCH_TIMEOUT_MS = 10_000;
 const SEARCH_MAX_FILES = 10_000;
 const SEARCH_MAX_TOTAL_BYTES = 20_000_000;
@@ -109,7 +109,7 @@ export function createListFilesTool(): ToolDefinition<z.infer<typeof listFilesIn
           truncated = true;
           return;
         }
-        if (IGNORED_DIRECTORIES.has(child.name)) continue;
+        if (isIgnoredDirectoryName(child.name)) continue;
         const absolute = resolve(directory, child.name);
         const metadata = await lstat(absolute);
         if (metadata.isSymbolicLink()) {
@@ -137,7 +137,7 @@ export function createListFilesTool(): ToolDefinition<z.infer<typeof listFilesIn
 export function createSearchTextTool(options: WorkspaceReadToolOptions = {}): ToolDefinition<z.infer<typeof searchTextInputSchema>, JsonObject> {
   return readOnlyTool("search_text", "Search bounded UTF-8 workspace text with ripgrep.", searchTextInputSchema, async (input, context) => {
     const boundary = await resolveWorkspacePath(context.workspace, input.path, true);
-    const args = ["--line-number", "--column", "--no-heading", "--color", "never", "--glob", "!.git/**", "--glob", "!node_modules/**", "--glob", "!dist/**", "--glob", "!artifacts/**"];
+    const args = ["--line-number", "--column", "--no-heading", "--color", "never", "--glob", "!.git/**", "--glob", "!.codeflow/**", "--glob", "!node_modules/**", "--glob", "!dist/**", "--glob", "!artifacts/**"];
     if (!input.regex) args.push("--fixed-strings");
     if (!input.caseSensitive) args.push("--ignore-case");
     args.push("--", input.query, normalizeRelative(boundary.root, boundary.candidate) || ".");
@@ -257,6 +257,7 @@ async function resolveWorkspacePath(
   const root = await realpath(workspace).catch(() => { throw toolError("workspace_unavailable", "The workspace root is unavailable.", true); });
   const unresolved = resolve(root, requested);
   assertContained(root, unresolved);
+  assertReadableWorkspacePath(root, unresolved);
   if (!mustExist) return { root, candidate: unresolved };
   const candidate = await realpath(unresolved).catch(() => { throw toolError("path_not_found", "The requested workspace path does not exist."); });
   assertContained(root, candidate);
@@ -264,6 +265,17 @@ async function resolveWorkspacePath(
   if (metadata.isSymbolicLink()) throw toolError("workspace_link_rejected", "Symbolic links and junctions are not followed.");
   if (!allowDirectory && metadata.isDirectory()) throw toolError("not_a_file", "The requested path is a directory.");
   return { root, candidate };
+}
+
+function assertReadableWorkspacePath(root: string, candidate: string): void {
+  const segments = relative(root, candidate).split(sep).filter(Boolean);
+  if (segments.some(isIgnoredDirectoryName)) {
+    throw toolError("path_ignored", "The requested path is excluded from model-visible workspace reads.");
+  }
+}
+
+function isIgnoredDirectoryName(name: string): boolean {
+  return IGNORED_DIRECTORIES.has(process.platform === "win32" ? name.toLowerCase() : name);
 }
 
 function assertContained(root: string, candidate: string): void {
@@ -493,7 +505,7 @@ async function searchTextWithoutRipgrep(
     const children = await readdir(absolute, { withFileTypes: true });
     children.sort((left, right) => left.name.localeCompare(right.name, "en"));
     for (const child of children) {
-      if (truncated || IGNORED_DIRECTORIES.has(child.name) || child.isSymbolicLink()) continue;
+      if (truncated || isIgnoredDirectoryName(child.name) || child.isSymbolicLink()) continue;
       await walk(resolve(absolute, child.name));
     }
   };

@@ -36,11 +36,11 @@
 | C06 | [ContextAssembler](06-context-assembler.md) | D3 | 排序骨架 | C00、C01、C05、C07 | Model、Loop |
 | C07 | [ToolDefinition 与 ToolRegistry](07-tool-registry.md) | D1–D3 | 基础实现 | C00 | Runtime、Context、Loop |
 | C08 | [ToolRuntime](08-tool-runtime.md) | D3–D4 | 基础流水线；版本/输出 schema 等缺失 | C00–C04、C07（不含 C05/C06） | 内置工具、Loop、Trace |
-| C09 | [18 个内置工具与外部 Provider](09-built-in-tools.md) | D3–D6 | 仅 `finish_task` 工厂 | C00、C02、C03、C07、C08；finish 依赖 C10 | Loop、CLI、Eval |
+| C09 | [18 个内置工具与外部 Provider](09-built-in-tools.md) | D3–D6 | 六个本地只读工具 + `finish_task`；其余延期 | C00、C02、C03、C07、C08；finish 依赖 C10 | Loop、CLI、Eval |
 | C10 | [CompletionGate](10-completion-gate.md) | D4 | 旧版 Gate；可信 Context/evidence 缺失 | C00、C01、C02 | 内置 finish、Loop、CLI、Eval |
-| C11 | [AgentEventLoop](11-agent-event-loop.md) | D3–D4 | 仅创建 Session | C01–C10 | Application、CLI、Eval |
-| C12 | [Application Service](12-application-service.md) | D3–D7 | 基础依赖组装 | C02–C11 | CLI、Session 命令、Eval |
-| C13 | [CLI/TUI 与 HITL](13-cli-tui.md) | D5 | 命令骨架 + 最简实时 Ink 任务树 | C01、C03、C04、C11、C12、C14 | 用户、Eval |
+| C11 | [AgentEventLoop](11-agent-event-loop.md) | D3–D4 | 最小持久只读 ReAct；恢复/HITL/写延期 | C01–C10 | Application、CLI、Eval |
+| C12 | [Application Service](12-application-service.md) | D3–D7 | 单次只读生产 runner + replay-tail source | C02–C11 | CLI、Session 命令、Eval |
+| C13 | [CLI/TUI 与 HITL](13-cli-tui.md) | D5 | `run` 已接实时只读任务树；resume/HITL 延期 | C01、C03、C04、C11、C12、C14 | 用户、Eval |
 | C14 | [Session、Trace 与生命周期治理](14-session-trace.md) | D7 | 接口/脱敏骨架 | C01、C02、C03、C12 | CLI、Eval、恢复 |
 | C15 | [Evaluation Harness](15-evaluation.md) | D8–D10 | 类型和总门槛 | C01–C14 | 发布决策 |
 

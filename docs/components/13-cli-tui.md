@@ -1,6 +1,6 @@
 # C13 CLI/TUI、实时任务树与 HITL
 
-- 状态：Commander 命令骨架 + Issue #7 最简实时 Ink 任务树；命令接线与 HITL 交互仍待开发
+- 状态：Issue #7 `run` 已接持久只读 Loop 与实时 Ink 任务树；resume/NDJSON/HITL 仍待开发
 - 目标阶段：D5，Session 命令随 D7 完善
 - 代码位置：`src/cli/`
 - 硬依赖：[C01](01-event-state.md)、[C03](03-permission-engine.md)、[C04](04-budget-controller.md)、[C11](11-agent-event-loop.md)、[C12](12-application-service.md)、[C14](14-session-trace.md)
@@ -27,7 +27,7 @@
 
 ## 3. 命令契约
 
-当前 Commander 已注册这些命令名称，但除 `run --prompt` 创建内存 Session 和 `config` 显示基础配置外，其余命令只输出骨架提示；下表描述目标行为（规划中）。
+当前 `run --prompt` 已执行持久只读纵向切片：要求环境提供 `DEEPSEEK_API_KEY`，从 `CODEFLOW_MODEL`/`CODEFLOW_DATA_DIR` 读取非秘密选择，TTY 实时渲染 Ink，非 TTY 输出无 ANSI 的最终任务树。`config` 显示脱敏配置状态；其余命令仍输出骨架提示。下表除 `run` 外主要描述目标行为（规划中）。
 
 | 命令 | 输入 | 成功输出 | 主要依赖 |
 | --- | --- | --- | --- |
@@ -62,7 +62,7 @@ interface CliRecord {
 
 `LiveSessionTaskTree` 只依赖与 C12 `SessionHandle.streamEvents({afterSequence, signal})` 同形的 `SessionEventSource`。一个组件实例固定绑定一个逻辑 Session；上层即使重建等价 source 对象也不会导致断流重放，切换 Session 必须更换 React `key` 以显式重建投影器。它从 sequence `-1` 请求完整 replay-then-tail 流，不在 CLI 内组合 `list()` 与 `subscribe()`。相同 event ID 与完全相同内容的重复投递为幂等；event ID 或 sequence 冲突、operation hash 多候选以及 trace gap 会停止视图并显示安全错误，而不是猜测状态。
 
-最简 Ink 视图已经展示 Session/目标/workspace/生命周期、计划 revision、模型与工具树、验证、预算、UNKNOWN 对账状态和首次错误。所有动态文本在进入 Ink 前转义终端控制字符，并按当前宽度截断。当前流失败会 fail-closed 并提示恢复；带退避、取消和 last-sequence 游标的自动重连仍随生产 `run/resume` 组合延期。完整 `run/resume` 命令接线、文件/diff 面板、NDJSON、ask/approval/cancel 输入和 C14 Session 管理仍按后续切片推进。
+最简 Ink 视图已经展示 Session/目标/workspace/生命周期、计划 revision、模型与工具树、验证、预算、UNKNOWN 对账状态和首次错误。`codeflow run` 现在通过 C12 最小 runner 消费同一个持久 replay-then-tail source，Ctrl+C 会把 AbortSignal 传到 Loop/Provider；非 TTY 等待终态后输出相同 ViewModel 的安全纯文本快照。所有动态文本在进入输出前转义终端控制字符，并按当前宽度截断。当前流失败会 fail-closed 并提示恢复；带退避和 last-sequence 游标的自动重连仍随 `resume` 延期。文件/diff 面板、NDJSON、ask/approval 输入和 C14 Session 管理仍按后续切片推进。
 
 至少展示：
 
@@ -141,7 +141,7 @@ CLI 只调用 C12 `SessionHandle.streamEvents({afterSequence})` 或 C14 等价�
 - `CLI-AC-009`：历史重放与实时事件在每个 sequence 交界注入并发事件时均无遗漏；重复投递不会重复显示副作用。
 - `CLI-AC-010`：非 TTY、过期 request ID 和预先拒绝 policy 的测试证明不存在默认批准路径。
 
-当前 Issue #7 切片以 `tests/session-task-tree.test.ts` 固定以下证据：完整 model/tool/verification 生命周期的 ViewModel 与 Ink snapshot、重复/冲突事件、C12 形状流消费、UNKNOWN 对账、首次错误保留，以及窄终端和控制字符转义。该证据覆盖 `CLI-AC-001` 的最简实时树范围和 `CLI-SR-003`；其余验收项保持未完成，不以占位实现计入。
+当前 Issue #7 切片以 `tests/session-task-tree.test.ts`、`tests/session-event-source.test.ts`、`tests/readonly-session-runner.test.ts` 和 `tests/run-readonly-command.test.ts` 固定以下证据：完整 model/tool/verification 生命周期的 ViewModel 与 Ink snapshot、重复/冲突事件、list/subscribe 交界、持久生产形状组装、UNKNOWN 对账、非 TTY 安全输出、窄终端和控制字符转义。该证据覆盖 `CLI-AC-001` 的只读实时树范围、`CLI-AC-009` 的单进程交界和 `CLI-SR-003`；NDJSON、resume/HITL 与完整重连验收保持未完成。
 
 ## 10. 实现任务建议
 

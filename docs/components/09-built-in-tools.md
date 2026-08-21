@@ -1,6 +1,6 @@
 # C09 18 个内置工具与外部 Provider
 
-- 状态：只有 `finish_task` 工厂；其余待实现
+- 状态：Issue #7 六个本地只读工具 + `finish_task` 工厂；其余十一项待实现
 - 目标阶段：D3–D6
 - 代码位置：建议 `src/tools/builtin/`、`src/providers/`
 - 硬依赖：[C00](00-shared-contracts.md)、[C02](02-storage-artifacts.md)、[C03](03-permission-engine.md)、[C07](07-tool-registry.md)、[C08](08-tool-runtime.md)；`finish_task` 切片额外依赖 [C10](10-completion-gate.md)
@@ -27,7 +27,7 @@ Provider 管理 OS/SDK/CLI 细节；ToolDefinition 管理模型可见 schema；T
 
 ## 3. 总清单与依赖顺序
 
-除 `finish_task` 工厂外，本节及后续各工具 schema 均为目标目录（规划中），当前 Registry 未注册这些工具，Provider 也尚不存在。
+当前 Registry 可注册 `list_files`、`search_text`、`read_file`、`git_status`、`git_diff`、`git_log` 和 `finish_task` 工厂；本节其余十一项及相应 Provider 仍是目标目录（规划中）。
 
 | 顺序 | 工具 | 风险 | 副作用 | 重试 | 阶段 |
 | --- | --- | --- | --- | --- | --- |
@@ -325,6 +325,8 @@ output: { commitSha: string; remoteBranch: string; prUrl: string;
 核心闭环首先注册 `list_files`、`search_text`、`read_file`、`git_status`、`git_diff`、`git_log`。六者均为 `risk=automatic`、`sideEffect=none`、`retryPolicy=safe`，只允许经 `ToolRegistry -> PermissionEngine -> ToolRuntime` 执行。工作区 provider 必须拒绝绝对路径、`..` 越界与 link/junction 跟随；命令使用参数数组且禁用 shell；读取、搜索、目录和 Git 输出必须有确定上限并响应 AbortSignal/deadline。所有 Git 读取使用 `--no-optional-locks`，以 `GIT_LITERAL_PATHSPECS=1` 和 `./` 前缀封闭 pathspec magic，并从允许列表构造子进程环境；工作区是仓库子目录时，status/diff/log 也只能观察该子树。`read_file` 只接受 UTF-8 并返回整文件 SHA-256。其余十二个工具仍按 D1 延期，不以占位实现计入覆盖。
 
 `search_text` 优先使用 `rg`；当部署环境不存在该可执行文件时，允许切换到内建 Node provider，但必须保持相同工作区/忽略目录/UTF-8/取消边界，并额外限制 10 秒、10,000 文件、20 MB 总读取量、2 MB 单文件和请求的 `maxMatches`。只有 executable-not-found 才能触发 fallback；regex、权限或其他 provider 错误继续显式失败。
+
+生产只读 runner 默认把 `.codeflow/` 作为应用私有数据目录；六个模型可见工具的目录遍历、搜索和直接路径解析都拒绝该目录，防止 Session SQLite/WAL 被重新送入模型上下文。
 
 - `TOOLS-AC-001`：18 个 ToolDefinition 全部通过 schema、策略组合和模型投影测试。
 - `TOOLS-AC-002`：所有文件/命令路径穿越、junction 和并发版本 fixture 被阻止。
