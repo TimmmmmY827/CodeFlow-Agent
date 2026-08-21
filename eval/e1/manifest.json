@@ -128,7 +128,7 @@
       "fixture": {
         "fixtureId": "11111111-1111-4111-8111-555555555555",
         "version": "fixture:1.0.0",
-        "snapshotHash": "sha256:386e02990df915c4adef9a6174bc6196cfe11811e99aac4ff746bf0b6617538e",
+        "snapshotHash": "sha256:a551d0580a0c5efd664dea8bf88f3986c78283fcd2fca164ac86a34724c565d4",
         "resetCommandId": "eval-fixture-reset:v1"
       },
       "prompt": "Fix UniqueStable so it removes duplicates while preserving the first-seen order and leaving the input unchanged.",
