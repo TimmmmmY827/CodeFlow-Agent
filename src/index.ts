@@ -62,6 +62,33 @@ export type {
 } from "./completion/completion-gate.js";
 export { ContextAssembler } from "./context/context-assembler.js";
 export {
+  EVALUATION_SUITE_SCHEMA_VERSION,
+  evaluationLanguageSchema,
+  evaluationScenarioSchema,
+  evaluationSuiteManifestSchema,
+  evaluationTaskSchema,
+  fixtureRefSchema,
+  passesMvpGate,
+  verifierRefSchema,
+} from "./eval/evaluation.js";
+export type {
+  EvaluationLanguage,
+  EvaluationResult,
+  EvaluationScenario,
+  EvaluationSuiteManifest,
+  EvaluationTask,
+  FixtureRef,
+  VerifierRef,
+} from "./eval/evaluation.js";
+export { E1FixtureHarness } from "./eval/fixture-harness.js";
+export type {
+  E1FixtureHarnessOptions,
+  FixtureResetResult,
+  FixtureSelfTestItem,
+  FixtureSelfTestReport,
+  FixtureVerificationResult,
+} from "./eval/fixture-harness.js";
+export {
   AGENT_EVENT_SCHEMA_VERSION,
   agentEventSchema,
   agentEventTypeSchema,

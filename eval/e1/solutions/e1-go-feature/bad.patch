@@ -1,0 +1,32 @@
+diff --git a/go.mod b/go.mod
+new file mode 100644
+--- /dev/null
++++ b/go.mod
+@@ -0,0 +1,3 @@
++module example.com/e1/labels
++
++go 1.22
+diff --git a/labels.go b/labels.go
+new file mode 100644
+--- /dev/null
++++ b/labels.go
+@@ -0,0 +1,19 @@
++package labels
++
++import (
++	"fmt"
++	"strings"
++)
++
++func Parse(values []string) (map[string]string, error) {
++	result := make(map[string]string, len(values))
++	for _, value := range values {
++		parts := strings.Split(value, "=")
++		if len(parts) != 2 {
++			return nil, fmt.Errorf("invalid label %q", value)
++		}
++		key := strings.TrimSpace(parts[0])
++		result[key] = strings.TrimSpace(parts[1])
++	}
++	return result, nil
++}

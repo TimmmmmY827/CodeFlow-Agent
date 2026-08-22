@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "executable": "go",
+  "args": ["test", "./..."],
+  "timeoutMs": 60000
+}

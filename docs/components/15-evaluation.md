@@ -1,8 +1,8 @@
 # C15 Evaluation Harness 与发布门
 
-- 状态：任务/结果类型和 5/6 总门槛存在，Runner/fixture/验证器缺失
+- 状态：Issue #7 E1 六任务 fixture、版本化清单、可信重置、隐藏 verifier 与 gold/bad 自检已实现；Runner、可信结果、报告和发布门仍缺失
 - 目标阶段：D8–D10
-- 代码位置：`src/eval/`、建议 `eval/fixtures/`、`eval/verifiers/`
+- 代码位置：`src/eval/`、`eval/e1/fixtures/`、`eval/e1/verifiers/`、`eval/e1/solutions/`
 - 硬依赖：C01–C14 的可执行契约
 - 下游消费者：MVP 发布决策、回归开发
 
@@ -34,9 +34,11 @@
 
 每个 fixture 固定：Git/目录快照、可见任务说明、可见验收条件、隐藏测试、允许/禁止动作、网络策略、预期修改边界和最大预算。
 
+Issue #7 的 E1 切片已交付上述六个单仓 fixture。`E1FixtureHarness.reset()` 只复制 task snapshot 并创建固定身份/时间的 Git commit，目标路径已存在时拒绝覆盖；`verify()` 先从 Git diff 检查 `editablePaths`，再把候选复制到独立临时目录并注入 hash 绑定的 verifier，隐藏源码和 gold/bad patch 从不进入 Agent 工作区。`self-test` 对六项分别证明 baseline 失败、gold 通过、known-bad 被拒绝。隔离等级仍是 `logical_workspace_boundary`，不宣称抵御同一 OS 用户的任意原生代码。
+
 ## 4. EvaluationTask 契约
 
-当前 `EvaluationTask` 只有 id/language/scenario/fixture、可见验收、单个 hiddenVerifier 和动作白名单/黑名单；`EvaluationResult` 只有 pass、安全标签、trace、耗时和成本，`passesMvpGate` 仅检查 6 项/5 项通过、安全标签为空和 trace 完整。下列版本化任务、预算和 verifier 引用是目标契约（规划中）：
+当前已实现版本化 `EvaluationTask`、`FixtureRef`、`VerifierRef` 和 suite manifest schema；任务额外固定 `editablePaths` 与 `networkPolicy = "deny"`，并直接复用 C04 `BudgetLimits`。旧 `EvaluationResult` 与 `passesMvpGate` 仍只是 D1 兼容基线，不能作为正式发布判定。下列 `EvaluationRunManifest`、可信 verifier 结果和目标 `EvaluationResult` 仍是规划中契约：
 
 目标 `EvaluationResult` 还必须把安全否决升级为 C10 `SafetyVeto` 或稳定事件引用，不能长期保留无来源的自然语言字符串。
 
@@ -52,6 +54,8 @@ interface EvaluationTask {
   hiddenVerifiers: VerifierRef[];
   allowedActions: string[];
   forbiddenActions: string[];
+  editablePaths: string[];
+  networkPolicy: "deny";
   limits: BudgetLimits;
 }
 
@@ -216,11 +220,13 @@ Judge 不能推翻测试失败、安全否决、trace 缺失或 CompletionGate r
 - `EVAL-AC-007`：每个发布阈值分别构造失败和 unknown fixture，证明成本 unknown、语言缺项、取消超时或 UX 样本不足均不能误通过。
 - `EVAL-AC-008`：报告明确区分 raw/effective sample size、基础设施排除项和隔离等级，并能追溯到 manifest/verifier/evidence 版本。
 
+Issue #7 E1 当前证据：`tests/e1-fixture-harness.test.ts` 覆盖完整 3×2 矩阵、snapshot/verifier hash、两次重置的 Git 确定性、隐藏文件不暴露、已有目标拒绝覆盖、越界修改拒绝和 TypeScript gold/bad 自检；CI 额外执行 `pnpm eval:fixtures -- self-test`，要求 TypeScript/Python/Go 六项 baseline/gold/bad 共 18 次验证全部符合预期。该证据只完成 `EVAL-AC-001`、`EVAL-AC-002` 的 fixture 范围和 `EVAL-SR-001` 的逻辑工作区边界，不提前宣称 C15 完成。
+
 ## 12. 实现任务建议
 
-1. 定义 fixture/verifier/run/report 版本化 schema。
-2. 各语言先做一个 gold/bad 样例验证重置器。
-3. 实现六任务 runner、隐藏验证和安全检查。
+1. [部分完成] fixture/verifier/task/suite 已版本化；run/report 仍待实现。
+2. [已完成] 三种语言、两种场景均有 baseline/gold/bad 样例和确定性重置。
+3. [部分完成] 六任务隐藏验证和修改边界检查已实现；Agent runner、trace/安全事实接线仍待实现。
 4. 接 usage/trace/CompletionGate 证据。
 5. 实现可视化消融和 OpenCode adapter。
 6. 运行完整基线，固化 bad case 并生成发布报告。

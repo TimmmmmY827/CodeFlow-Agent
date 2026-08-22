@@ -14,6 +14,7 @@
     "build": "tsc -p tsconfig.build.json",
     "check": "pnpm typecheck && pnpm test && pnpm build",
     "dev": "tsx src/cli/index.ts",
+    "eval:fixtures": "tsx src/eval/fixture-cli.ts",
     "start": "node dist/cli/index.js",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "executable": "node",
+  "args": ["--test", "_codeflow_hidden/parse-duration.hidden.test.ts"],
+  "timeoutMs": 30000
+}

@@ -1,0 +1,182 @@
+{
+  "schemaVersion": 1,
+  "suiteId": "e1-six-task-mvp",
+  "version": "e1-suite:1.0.0",
+  "isolation": "logical_workspace_boundary",
+  "tasks": [
+    {
+      "id": "e1-typescript-bug",
+      "version": "e1-task:1.0.0",
+      "language": "typescript",
+      "scenario": "existing-repository-bug",
+      "fixture": {
+        "fixtureId": "11111111-1111-4111-8111-111111111111",
+        "version": "fixture:1.0.0",
+        "snapshotHash": "sha256:f97b0bb367aeaf863055c25a006a4641dbc7408912e026106bd0d79ae4d6e4cc",
+        "resetCommandId": "eval-fixture-reset:v1"
+      },
+      "prompt": "Fix parseDuration so every documented duration unit is converted to milliseconds without weakening validation.",
+      "visibleAcceptanceCriteria": [
+        "The existing TypeScript test passes.",
+        "Only src/parse-duration.ts is modified.",
+        "Malformed duration strings still throw TypeError."
+      ],
+      "hiddenVerifiers": [{
+        "verifierId": "21111111-1111-4111-8111-111111111111",
+        "version": "e1-verifier:1.0.0",
+        "artifactHash": "sha256:57e81aa5b72ef122279523c3c8b5809235603b0ada632413f270ff0b3ed49398",
+        "kind": "test"
+      }],
+      "allowedActions": ["list_files", "search_text", "read_file", "git_status", "git_diff", "git_log", "apply_patch", "run_command", "finish_task"],
+      "forbiddenActions": ["network_access", "dependency_install", "workspace_escape", "git_publish"],
+      "editablePaths": ["src/parse-duration.ts"],
+      "networkPolicy": "deny",
+      "limits": {"maxSteps": 20, "maxToolCalls": 40, "maxDurationMs": 1200000, "maxInputTokens": 200000, "maxOutputTokens": 20000, "maxCostUsd": 1, "maxRetriesPerOperation": 2, "maxNoProgressCycles": 3}
+    },
+    {
+      "id": "e1-typescript-feature",
+      "version": "e1-task:1.0.0",
+      "language": "typescript",
+      "scenario": "new-project-feature",
+      "fixture": {
+        "fixtureId": "11111111-1111-4111-8111-222222222222",
+        "version": "fixture:1.0.0",
+        "snapshotHash": "sha256:b81ffca5a32adf76a02d2a36be22707f00d13d639413747a79a102078b556404",
+        "resetCommandId": "eval-fixture-reset:v1"
+      },
+      "prompt": "Initialize the minimal TypeScript project described in README.md and implement a safe, order-preserving groupBy utility.",
+      "visibleAcceptanceCriteria": [
+        "src/group-by.ts exports groupBy.",
+        "Grouping preserves input and per-group order without mutating the input.",
+        "Prototype-like string keys are handled as ordinary keys."
+      ],
+      "hiddenVerifiers": [{
+        "verifierId": "21111111-1111-4111-8111-222222222222",
+        "version": "e1-verifier:1.0.0",
+        "artifactHash": "sha256:e26fedb77c47b2898335d86d1045de6e52b4cdea9289be653217c55d19ba6836",
+        "kind": "test"
+      }],
+      "allowedActions": ["list_files", "search_text", "read_file", "git_status", "git_diff", "git_log", "apply_patch", "write_file", "run_command", "finish_task"],
+      "forbiddenActions": ["network_access", "dependency_install", "workspace_escape", "git_publish"],
+      "editablePaths": ["package.json", "tsconfig.json", "src"],
+      "networkPolicy": "deny",
+      "limits": {"maxSteps": 20, "maxToolCalls": 40, "maxDurationMs": 1200000, "maxInputTokens": 200000, "maxOutputTokens": 20000, "maxCostUsd": 1, "maxRetriesPerOperation": 2, "maxNoProgressCycles": 3}
+    },
+    {
+      "id": "e1-python-bug",
+      "version": "e1-task:1.0.0",
+      "language": "python",
+      "scenario": "existing-repository-bug",
+      "fixture": {
+        "fixtureId": "11111111-1111-4111-8111-333333333333",
+        "version": "fixture:1.0.0",
+        "snapshotHash": "sha256:cc899ec4f5502fa37f99704e0ae1147cd4a131393c7e705443e2e624c309f4ce",
+        "resetCommandId": "eval-fixture-reset:v1"
+      },
+      "prompt": "Fix available_stock so reservations can never produce a negative available quantity while preserving the function's input contract.",
+      "visibleAcceptanceCriteria": [
+        "python -m unittest passes.",
+        "Only inventory.py is modified.",
+        "The input mappings are not mutated."
+      ],
+      "hiddenVerifiers": [{
+        "verifierId": "21111111-1111-4111-8111-333333333333",
+        "version": "e1-verifier:1.0.0",
+        "artifactHash": "sha256:bb32b78f8253f8bd4f05370966430decbc25fb689dc95cd1ca4f64820b99528f",
+        "kind": "test"
+      }],
+      "allowedActions": ["list_files", "search_text", "read_file", "git_status", "git_diff", "git_log", "apply_patch", "run_command", "finish_task"],
+      "forbiddenActions": ["network_access", "dependency_install", "workspace_escape", "git_publish"],
+      "editablePaths": ["inventory.py"],
+      "networkPolicy": "deny",
+      "limits": {"maxSteps": 20, "maxToolCalls": 40, "maxDurationMs": 1200000, "maxInputTokens": 200000, "maxOutputTokens": 20000, "maxCostUsd": 1, "maxRetriesPerOperation": 2, "maxNoProgressCycles": 3}
+    },
+    {
+      "id": "e1-python-feature",
+      "version": "e1-task:1.0.0",
+      "language": "python",
+      "scenario": "new-project-feature",
+      "fixture": {
+        "fixtureId": "11111111-1111-4111-8111-444444444444",
+        "version": "fixture:1.0.0",
+        "snapshotHash": "sha256:103c17ba34ab3532bbb0e697705766a3acb55be8f19b54767026ddfba6088619",
+        "resetCommandId": "eval-fixture-reset:v1"
+      },
+      "prompt": "Implement the text statistics module described in README.md using only the Python standard library.",
+      "visibleAcceptanceCriteria": [
+        "text_stats.py exports word_frequencies.",
+        "Matching is case-insensitive and punctuation separates words.",
+        "The returned mapping preserves first-seen key order."
+      ],
+      "hiddenVerifiers": [{
+        "verifierId": "21111111-1111-4111-8111-444444444444",
+        "version": "e1-verifier:1.0.0",
+        "artifactHash": "sha256:2e4e0064939423d760fffe029568f794fb8c633c1deb3eff300fc461efc6e674",
+        "kind": "test"
+      }],
+      "allowedActions": ["list_files", "search_text", "read_file", "git_status", "git_diff", "git_log", "apply_patch", "write_file", "run_command", "finish_task"],
+      "forbiddenActions": ["network_access", "dependency_install", "workspace_escape", "git_publish"],
+      "editablePaths": ["text_stats.py", "test_text_stats.py"],
+      "networkPolicy": "deny",
+      "limits": {"maxSteps": 20, "maxToolCalls": 40, "maxDurationMs": 1200000, "maxInputTokens": 200000, "maxOutputTokens": 20000, "maxCostUsd": 1, "maxRetriesPerOperation": 2, "maxNoProgressCycles": 3}
+    },
+    {
+      "id": "e1-go-bug",
+      "version": "e1-task:1.0.0",
+      "language": "go",
+      "scenario": "existing-repository-bug",
+      "fixture": {
+        "fixtureId": "11111111-1111-4111-8111-555555555555",
+        "version": "fixture:1.0.0",
+        "snapshotHash": "sha256:a551d0580a0c5efd664dea8bf88f3986c78283fcd2fca164ac86a34724c565d4",
+        "resetCommandId": "eval-fixture-reset:v1"
+      },
+      "prompt": "Fix UniqueStable so it removes duplicates while preserving the first-seen order and leaving the input unchanged.",
+      "visibleAcceptanceCriteria": [
+        "go test ./... passes.",
+        "Only unique.go is modified.",
+        "The input slice is not mutated."
+      ],
+      "hiddenVerifiers": [{
+        "verifierId": "21111111-1111-4111-8111-555555555555",
+        "version": "e1-verifier:1.0.0",
+        "artifactHash": "sha256:56c513f182353c81041df6d378dde17f65f1764d16f1139190c9e80f024cada1",
+        "kind": "test"
+      }],
+      "allowedActions": ["list_files", "search_text", "read_file", "git_status", "git_diff", "git_log", "apply_patch", "run_command", "finish_task"],
+      "forbiddenActions": ["network_access", "dependency_install", "workspace_escape", "git_publish"],
+      "editablePaths": ["unique.go"],
+      "networkPolicy": "deny",
+      "limits": {"maxSteps": 20, "maxToolCalls": 40, "maxDurationMs": 1200000, "maxInputTokens": 200000, "maxOutputTokens": 20000, "maxCostUsd": 1, "maxRetriesPerOperation": 2, "maxNoProgressCycles": 3}
+    },
+    {
+      "id": "e1-go-feature",
+      "version": "e1-task:1.0.0",
+      "language": "go",
+      "scenario": "new-project-feature",
+      "fixture": {
+        "fixtureId": "11111111-1111-4111-8111-666666666666",
+        "version": "fixture:1.0.0",
+        "snapshotHash": "sha256:5f54fd873c1436e34bcec4c0aa308494a5813822bd8af443e1ea7d8653425c98",
+        "resetCommandId": "eval-fixture-reset:v1"
+      },
+      "prompt": "Initialize the minimal Go module described in README.md and implement the labels Parse function without external dependencies.",
+      "visibleAcceptanceCriteria": [
+        "Package labels exports Parse(values []string) (map[string]string, error).",
+        "Whitespace is trimmed and later duplicate keys replace earlier values.",
+        "Malformed input returns an error and no partial result."
+      ],
+      "hiddenVerifiers": [{
+        "verifierId": "21111111-1111-4111-8111-666666666666",
+        "version": "e1-verifier:1.0.0",
+        "artifactHash": "sha256:016bd216c693ecc2d988538e9bb97e007d7319f63d08f58c3718c133c10de7a7",
+        "kind": "test"
+      }],
+      "allowedActions": ["list_files", "search_text", "read_file", "git_status", "git_diff", "git_log", "apply_patch", "write_file", "run_command", "finish_task"],
+      "forbiddenActions": ["network_access", "dependency_install", "workspace_escape", "git_publish"],
+      "editablePaths": ["go.mod", "labels.go", "labels_test.go"],
+      "networkPolicy": "deny",
+      "limits": {"maxSteps": 20, "maxToolCalls": 40, "maxDurationMs": 1200000, "maxInputTokens": 200000, "maxOutputTokens": 20000, "maxCostUsd": 1, "maxRetriesPerOperation": 2, "maxNoProgressCycles": 3}
+    }
+  ]
+}
