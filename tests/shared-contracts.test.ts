@@ -204,11 +204,22 @@ describe("shared contracts", () => {
     };
     application.toolRegistry.register({
       name: "cancellation_probe",
+      version: "tool:cancellation_probe@test",
+      normalizationVersion: "normalization:test-v1",
       description: "Observe cancellation propagation",
       risk: "automatic",
       sideEffect: "none",
       retryPolicy: "safe",
       inputSchema: z.object({}),
+      outputSchema: z.object({ observed: z.boolean() }),
+      availability: {
+        available: true,
+        reasonCode: null,
+        message: null,
+        checkedAt: "2026-08-09T00:00:00.000Z",
+      },
+      normalizeInput: (input) => ({ effectiveInput: input, transformations: [] }),
+      claimResources: () => [{ key: "workspace:cancellation", mode: "read", scope: "workspace" }],
       execute: async (_input, context) => {
         toolSignal = context.signal;
         const subprocessContext: CancellationContext = context;

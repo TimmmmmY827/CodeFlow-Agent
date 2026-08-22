@@ -1,6 +1,6 @@
 # C09 18 个内置工具与外部 Provider
 
-- 状态：Issue #7 六个本地只读工具 + `finish_task` 工厂；其余十一项待实现
+- 状态：Issue #7 六个本地只读工具 + `finish_task` 工厂已迁移至 C07 版本化输入/输出 schema、availability、规范化和资源声明；其余十一项待实现
 - 目标阶段：D3–D6
 - 代码位置：建议 `src/tools/builtin/`、`src/providers/`
 - 硬依赖：[C00](00-shared-contracts.md)、[C02](02-storage-artifacts.md)、[C03](03-permission-engine.md)、[C07](07-tool-registry.md)、[C08](08-tool-runtime.md)；`finish_task` 切片额外依赖 [C10](10-completion-gate.md)

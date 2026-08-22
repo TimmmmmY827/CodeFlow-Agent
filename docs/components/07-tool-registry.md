@@ -1,6 +1,6 @@
 # C07 ToolDefinition 与 ToolRegistry
 
-- 状态：注册、查询、列表和基础元数据已实现
+- 状态：版本化 ToolDefinition、输入/输出 schema hash、availability、资源声明、模型投影和稳定目录 manifest 已实现；完整 18 工具目录及环境探测延期
 - 目标阶段：D1–D3
 - 代码位置：`src/tools/tool.ts`、`tool-registry.ts`
 - 硬依赖：[C00 共享契约](00-shared-contracts.md)
@@ -25,7 +25,7 @@
 
 ## 3. ToolDefinition
 
-### 3.1 目标接口（规划中）
+### 3.1 当前可编译接口
 
 ```ts
 interface ToolDefinition<I, O> {
@@ -75,7 +75,10 @@ interface ToolAvailability {
 interface ToolCatalogManifest {
   schemaVersion: number;
   catalogHash: string;
-  tools: ToolContractIdentity[];
+  tools: Array<{
+    contract: ToolContractIdentity;
+    availability: ToolAvailability;
+  }>;
   generatedAt: UtcTimestamp;
 }
 ```
@@ -84,9 +87,11 @@ interface ToolCatalogManifest {
 
 `ResourceClaim` 至少包含稳定资源 key、`read|write` 模式和作用域；C08 只根据这些声明判断并行，不从自然语言描述猜测冲突。
 
-### 3.2 当前可编译基线
+### 3.2 当前实现边界
 
-当前代码只有 name、description、risk、sideEffect、retryPolicy、inputSchema 和 execute；缺 `version`、`outputSchema`、availability、策略组合校验、模型投影和目录 hash，实施 C07 时必须补齐。
+Registry 在注册阶段 fail closed 校验 name/version、输入和输出 schema 的 Draft-07 投影、availability 形状及 risk/side-effect/retry 组合；为每个定义生成 `ToolContractIdentity`，并按工具名的 Unicode code-point 顺序生成 manifest。首次生成 manifest 会封存 Registry，之后不得追加定义，避免 Session 的目录 hash 与 Runtime 实际目录漂移。目录 hash 绑定 contract、可用状态和稳定 reason code，不绑定观察时间或人类消息，因此同一能力事实可跨进程稳定复现。模型列表只包含 available 工具，但完整 manifest 保留 unavailable 工具及原因供恢复和诊断。
+
+当前固定目录包含 Issue #7 的六个本地只读工具与 `finish_task`。其余十一项工具、OS/Git/gh/Provider 的生产 availability probes，以及基于资源 claim 的并发调度属于后续 C09/C08 切片；不能用占位工具计入 18 工具验收。
 
 ## 4. 功能需求
 
@@ -109,7 +114,7 @@ interface ToolCatalogManifest {
 | automatic | none | safe | 是 |
 | task_authorized | workspace_write | never/safe（需工具证明） | 是 |
 | single_confirmation | workspace_write | never | 是 |
-| single_confirmation | external_write | reconcile | 是 |
+| single_confirmation | external_write | reconcile/never | 是 |
 | control | none | safe/never | 是 |
 | automatic | external_write | 任意 | 否 |
 
@@ -129,6 +134,8 @@ interface ToolCatalogManifest {
 ## 8. 验收标准
 
 Issue #7 的只读纵向切片使用 `ToolRegistry.listForModel()` 从 Runtime 同一份 Zod input schema 生成 Draft-07 JSON Schema；投影失败必须在模型调用前中止。投影默认 `strict=false` 以兼容 DeepSeek 标准 endpoint，Runtime 仍以同一 Zod schema 做权威校验；只有显式切换 `/beta` endpoint 才可由组装层升级 strict。该投影只输出 JSON 结构，不让 C07 依赖具体模型 SDK。
+
+当前七个已实现工具满足唯一 name/version、输入/输出 schema、契约 hash、稳定 manifest 与合法策略组合；`REG-AC-001`、`REG-AC-004`、`REG-AC-005` 和 `REG-AC-007` 的完整 18 工具/环境恢复/并发范围保持未完成。目录契约测试覆盖注册顺序与 observation time 不影响 hash，以及 version/schema/normalization/availability 变化会改变 hash。
 
 - `REG-AC-001`：18 个 MVP 工具都有唯一 name/version、输入/输出 schema 和合法策略组合。
 - `REG-AC-002`：重名、非法策略组合和不可投影 schema 在启动测试中失败。
