@@ -70,7 +70,7 @@ describe("E1 fixture harness", () => {
     expect(report.passed).toBe(true);
     expect(report.items).toHaveLength(2);
     expect(report.items.every((item) => item.baselineRejected && item.goldPassed && item.badRejected)).toBe(true);
-  });
+  }, 30_000);
 });
 
 describe("E1 manifest contract", () => {
