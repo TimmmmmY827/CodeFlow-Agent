@@ -1,6 +1,6 @@
 # C03 PermissionEngine 与批准契约
 
-- 状态：完整 OperationBinding、四级权限判断、任务授权校验、安全摘要和 SQLite 持久审批状态机已实现；C08 原子执行事务接线仍待该组件开发
+- 状态：完整 OperationBinding、四级权限判断、任务授权校验、安全摘要和 SQLite 持久审批状态机已实现；C08 已接持久审批读取，并将批准消费、预算预留和 started 事实置于同一执行事务
 - 目标阶段：D1–D6
 - 代码位置：`src/policy/permission-engine.ts`、`permission-contracts.ts`、`operation-hash.ts`、`approval-summary.ts`；SQLite provider 位于 `src/storage/sqlite/sqlite-approval-repository.ts`
 - 硬依赖：[C00 共享契约](00-shared-contracts.md)
@@ -66,7 +66,7 @@ operationHash = sha256(canonicalJson(operationBinding))
 
 `effectiveInputHash` 通过 `createEffectiveInputHash()` 对 C07 `inputSchema` 解析并执行版本化 normalization 后的最终参数计算，不是模型发送的原始 JSON。Session/Task/授权版本、工具版本、schema、normalization、workspace、代码/diff 和行为配置任一变化都使旧批准失效。只影响显示、不影响行为的 UI 配置不得进入 binding。
 
-当前公共 `ApprovalToken` 已精简为上述三个字段，`createOperationHash` 只接受完整 `OperationBinding`。C08 当前基础 Runtime 暂时调用显式命名的 `createLegacyOperationHash` 与 `PermissionEngine.decide()` 兼容入口；新代码不得使用该不完整身份。待 C07 提供版本化工具/schema/normalization 元数据后，C08 必须改为构造完整 binding 并调用 `evaluate()`，随后删除 legacy 入口。
+公共 `ApprovalToken` 只包含上述三个字段，`createOperationHash` 只接受完整 `OperationBinding`。C08 Runtime 已从 C07 的版本化 tool/schema/normalization 注册事实构造完整 binding，并统一调用 `PermissionEngine.evaluate()`；不完整的 legacy hash、布尔写授权和进程内审批入口已删除。
 
 `SqliteApprovalRepository` 持久化固定状态机，并提供只能在 `SqliteStorageDatabase.runImmediateTransaction()` 同步 callback 内调用的 `consumeWithinTransaction()`。C08 在工具开始执行前把它与预算、operation 和 `tool.started` 一起提交；消费后即使工具失败也不得自动复用，外部写失败进入 `UNKNOWN` 并先对账。
 

@@ -67,6 +67,8 @@ describe("AgentEventLoop read-only vertical slice", () => {
     const result = await loop.runReadonlySession({
       sessionId: bundle.session.sessionId,
       taskId: bundle.rootTask.taskId,
+      workspaceId: bundle.session.workspace.workspaceId,
+      authorizationVersion: "authorization:readonly-v1",
       traceId: bundle.createdEvent.traceId,
       workspacePath: workspace,
       codeVersion: CODE_VERSION,
@@ -134,6 +136,8 @@ describe("AgentEventLoop read-only vertical slice", () => {
     const result = await loop.runReadonlySession({
       sessionId: bundle.session.sessionId,
       taskId: bundle.rootTask.taskId,
+      workspaceId: bundle.session.workspace.workspaceId,
+      authorizationVersion: "authorization:readonly-v1",
       traceId: bundle.createdEvent.traceId,
       workspacePath: workspace,
       codeVersion: CODE_VERSION,
@@ -179,6 +183,8 @@ describe("AgentEventLoop read-only vertical slice", () => {
     const result = await loop.runReadonlySession({
       sessionId: bundle.session.sessionId,
       taskId: bundle.rootTask.taskId,
+      workspaceId: bundle.session.workspace.workspaceId,
+      authorizationVersion: "authorization:readonly-v1",
       traceId: bundle.createdEvent.traceId,
       workspacePath: workspace,
       codeVersion: CODE_VERSION,
@@ -224,6 +230,8 @@ describe("AgentEventLoop read-only vertical slice", () => {
     const result = await loop.runReadonlySession({
       sessionId: bundle.session.sessionId,
       taskId: bundle.rootTask.taskId,
+      workspaceId: bundle.session.workspace.workspaceId,
+      authorizationVersion: "authorization:readonly-v1",
       traceId: bundle.createdEvent.traceId,
       workspacePath: workspace,
       codeVersion: CODE_VERSION,

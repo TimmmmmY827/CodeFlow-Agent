@@ -238,7 +238,9 @@ describe("shared contracts", () => {
       configVersion: "config:v1",
       sessionId: createStableId(),
       taskId: createStableId(),
-      taskWriteAuthorized: false,
+      workspaceId: createStableId(),
+      authorizationVersion: "authorization:test-v1",
+      taskAuthorization: null,
       approvalToken: null,
       ...applicationContext,
     });

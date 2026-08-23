@@ -3,8 +3,17 @@ import { createHash } from "node:crypto";
 
 import type { ExecutionJournal, ExecutionLease } from "../events/execution-journal.js";
 import { budgetDeltaSchema } from "../policy/budget-contracts.js";
-import type { LegacyApprovalToken, PermissionEngine } from "../policy/permission-engine.js";
-import { createLegacyOperationHash } from "../policy/operation-hash.js";
+import type { PermissionEngine } from "../policy/permission-engine.js";
+import {
+  OPERATION_BINDING_VERSION,
+  approvalTokenSchema,
+  operationBindingSchema,
+  type ApprovalRecord,
+  type ApprovalRepository,
+  type ApprovalToken,
+  type TaskAuthorization,
+} from "../policy/permission-contracts.js";
+import { createOperationHash } from "../policy/operation-hash.js";
 import {
   cancellationFailure,
   elapsedMilliseconds,
@@ -53,11 +62,13 @@ export interface ToolExecutionRequest {
   readonly deadlineAt?: UtcTimestamp | null;
   readonly sessionId: StableId;
   readonly taskId: StableId;
+  readonly workspaceId: StableId;
+  readonly authorizationVersion: string;
   readonly traceId?: StableId;
   readonly parentTaskId?: StableId | null;
   readonly actorId?: string;
-  readonly taskWriteAuthorized: boolean;
-  readonly approvalToken: LegacyApprovalToken | null;
+  readonly taskAuthorization: TaskAuthorization | null;
+  readonly approvalToken: ApprovalToken | null;
 }
 
 export interface ToolRuntimeEvent {
@@ -73,14 +84,15 @@ export interface ToolRuntimeOptions {
   readonly maxInlineBytes?: number;
   readonly observe?: (event: ToolRuntimeEvent) => void | Promise<void>;
   readonly journal?: ExecutionJournal;
+  readonly approvalRepository?: Pick<ApprovalRepository, "get">;
 }
 
 export class ToolRuntime {
-  readonly #consumedApprovalIds = new Set<string>();
   readonly #artifactStore: ArtifactWriter | null;
   readonly #maxInlineBytes: number;
   readonly #observe: ((event: ToolRuntimeEvent) => void | Promise<void>) | null;
   readonly #journal: ExecutionJournal | null;
+  readonly #approvalRepository: Pick<ApprovalRepository, "get"> | null;
 
   constructor(
     private readonly registry: ToolRegistry,
@@ -91,6 +103,7 @@ export class ToolRuntime {
     this.#maxInlineBytes = options.maxInlineBytes ?? 32_000;
     this.#observe = options.observe ?? null;
     this.#journal = options.journal ?? null;
+    this.#approvalRepository = options.approvalRepository ?? null;
   }
 
   async execute(request: ToolExecutionRequest): Promise<ToolResultEnvelope> {
@@ -199,23 +212,35 @@ export class ToolRuntime {
     }
 
     let operationHash: string;
+    let binding: ReturnType<typeof operationBindingSchema.parse>;
     try {
-      operationHash = createLegacyOperationHash({
+      binding = operationBindingSchema.parse({
+        bindingVersion: OPERATION_BINDING_VERSION,
+        sessionId: request.sessionId,
+        taskId: request.taskId,
+        authorizationVersion: request.authorizationVersion,
         toolName: tool.name,
-        input: effectiveInput,
+        toolVersion: tool.contract.version,
+        inputSchemaHash: tool.contract.inputSchemaHash,
+        normalizationVersion: tool.contract.normalizationVersion,
+        effectiveInputHash,
+        workspaceId: request.workspaceId,
         codeVersion: request.codeVersion,
+        diffHash: request.diffHash ?? null,
+        configVersion: request.configVersion,
       });
+      operationHash = createOperationHash(binding);
     } catch (error: unknown) {
       return failure(
         tool.name,
         "",
         0,
-        "not_json_serializable",
-        error instanceof Error ? error.message : String(error),
+        "operation_binding_invalid",
+        error instanceof Error ? error.message : "The operation binding is invalid.",
         false,
         "failed",
         sideEffectBeforeExecution(tool.sideEffect),
-        "Use a JSON-serializable tool input schema.",
+        "Refresh the Session, workspace and tool contract before retrying.",
       );
     }
     const cancellation = cancellationFailure({
@@ -234,15 +259,51 @@ export class ToolRuntime {
         { ...cancellation, sideEffectStatus: sideEffectBeforeExecution(tool.sideEffect) },
       );
     }
-    const permission = this.permissionEngine.decide(tool, {
-      taskWriteAuthorized: request.taskWriteAuthorized,
-      operationHash,
+    let approvalRecord: ApprovalRecord | null = null;
+    if (request.approvalToken) {
+      const token = approvalTokenSchema.safeParse(request.approvalToken);
+      if (!token.success) {
+        const sideEffectStatus = sideEffectBeforeExecution(tool.sideEffect);
+        return envelope(
+          tool.name,
+          operationHash,
+          "denied",
+          0,
+          sideEffectStatus,
+          null,
+          null,
+          {
+            category: "approval_invalid",
+            message: "The approval token does not match the current permission schema.",
+            retryable: false,
+            sideEffectStatus,
+            recovery: "Request a new approval for the current operation binding.",
+          },
+        );
+      }
+      if (!this.#approvalRepository) {
+        return failure(tool.name, operationHash, 0, "approval_repository_unavailable", "Durable approval evidence cannot be loaded.", false, "failed", sideEffectBeforeExecution(tool.sideEffect));
+      }
+      try {
+        approvalRecord = await this.#approvalRepository.get(token.data.approvalId);
+      } catch (error: unknown) {
+        const details = {
+          ...errorDetails(error, "approval_lookup_failed", "Durable approval evidence could not be loaded."),
+          sideEffectStatus: sideEffectBeforeExecution(tool.sideEffect),
+        };
+        return envelope(tool.name, operationHash, "failed", 0, details.sideEffectStatus, null, null, details);
+      }
+    }
+    const permission = this.permissionEngine.evaluate(tool, {
+      binding,
+      taskAuthorization: request.taskAuthorization,
       approvalToken: request.approvalToken,
+      approvalRecord,
     });
 
     if (permission.outcome === "confirm") {
       return envelope(tool.name, operationHash, "approval_required", 0, sideEffectBeforeExecution(tool.sideEffect), null, null, {
-        category: "approval_required",
+        category: permission.reasonCode,
         message: permission.reason,
         retryable: true,
         sideEffectStatus: sideEffectBeforeExecution(tool.sideEffect),
@@ -251,29 +312,15 @@ export class ToolRuntime {
     }
     if (permission.outcome === "deny") {
       return envelope(tool.name, operationHash, "denied", 0, sideEffectBeforeExecution(tool.sideEffect), null, null, {
-        category: "permission_denied",
+        category: permission.reasonCode,
         message: permission.reason,
         retryable: false,
         sideEffectStatus: sideEffectBeforeExecution(tool.sideEffect),
         recovery: null,
       });
     }
-    if (
-      tool.risk === "single_confirmation" &&
-      request.approvalToken &&
-      this.#consumedApprovalIds.has(request.approvalToken.approvalId)
-    ) {
-      return envelope(tool.name, operationHash, "denied", 0, sideEffectBeforeExecution(tool.sideEffect), null, null, {
-        category: "approval_already_consumed",
-        message: "The single-use approval has already been consumed.",
-        retryable: false,
-        sideEffectStatus: sideEffectBeforeExecution(tool.sideEffect),
-        recovery: "Reconcile the previous operation before requesting a new approval.",
-      });
-    }
-
-    if (tool.risk === "single_confirmation" && request.approvalToken) {
-      this.#consumedApprovalIds.add(request.approvalToken.approvalId);
+    if (tool.sideEffect !== "none" && !this.#journal) {
+      return failure(tool.name, operationHash, 0, "durable_journal_required", "Write tools require a durable execution journal before they can start.", false, "failed", "not_started");
     }
 
     let journalLease: ExecutionLease | null = null;
@@ -309,6 +356,15 @@ export class ToolRuntime {
           name: tool.name,
           operationHash,
           estimate: budgetDeltaSchema.parse({ toolCalls: 1 }),
+          authorization: {
+            risk: tool.risk,
+            authorizationId: permission.authorizationId,
+            approvalId: permission.approvalId,
+          },
+          approvalToConsume: permission.approvalId === null ? null : {
+            approvalId: permission.approvalId,
+            operationHash,
+          },
           payload: {
             toolName: tool.name,
             toolContract: {
@@ -325,7 +381,10 @@ export class ToolRuntime {
           },
         });
       } catch (error: unknown) {
-        const details = errorDetails(error, "tool_journal_begin_failed", "The durable tool start could not be recorded.");
+        const details = {
+          ...errorDetails(error, "tool_journal_begin_failed", "The durable tool start could not be recorded."),
+          sideEffectStatus: sideEffectBeforeExecution(tool.sideEffect),
+        };
         return envelope(tool.name, operationHash, "failed", 0, details.sideEffectStatus, null, null, details);
       }
     }

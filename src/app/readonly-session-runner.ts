@@ -156,6 +156,8 @@ export async function startReadonlySession(
       sessionId: bundle.session.sessionId,
       taskId: bundle.rootTask.taskId,
       traceId: bundle.createdEvent.traceId,
+      workspaceId: bundle.session.workspace.workspaceId,
+      authorizationVersion: "authorization:readonly-v1",
       workspacePath: workspace,
       codeVersion: initialSnapshot.codeVersion,
       diffHash: initialSnapshot.diffHash,

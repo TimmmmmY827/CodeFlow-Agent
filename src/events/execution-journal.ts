@@ -4,6 +4,7 @@ import type {
   SideEffectStatus,
   StableId,
   StructuredError,
+  ToolRisk,
   UsageRecord,
   UtcTimestamp,
 } from "../shared/contracts.js";
@@ -27,6 +28,15 @@ export interface BeginExecutionInput {
   readonly name: string;
   readonly operationHash: string;
   readonly estimate: BudgetDelta;
+  readonly authorization?: {
+    readonly risk: ToolRisk;
+    readonly authorizationId: StableId | null;
+    readonly approvalId: StableId | null;
+  } | null;
+  readonly approvalToConsume?: {
+    readonly approvalId: StableId;
+    readonly operationHash: string;
+  } | null;
   readonly payload?: JsonObject;
 }
 
@@ -38,6 +48,7 @@ export interface ExecutionLease {
   readonly kind: "model" | "tool";
   readonly name: string;
   readonly operationHash: string;
+  readonly authorization: NonNullable<BeginExecutionInput["authorization"]> | null;
   readonly startedAt: UtcTimestamp;
 }
 

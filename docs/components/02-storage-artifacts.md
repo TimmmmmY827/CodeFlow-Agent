@@ -1,6 +1,6 @@
 # C02 存储、EventStore 与 ArtifactStore
 
-- 状态：C02 核心 SQLite/Event/Session/Task/File Artifact、迁移、删除/保留与恢复检查已实现；C08/C11 journal adapter、原生 Windows handle-relative 加固与跨进程强杀验收仍延期
+- 状态：C02 核心 SQLite/Event/Session/Task/File Artifact、迁移、删除/保留、恢复检查和 C08/C11 SQLite execution journal adapter 已实现；独立 operation 恢复、原生 Windows handle-relative 加固与跨进程强杀验收仍延期
 - 目标阶段：D7；接口应在 D3 前冻结
 - 代码位置：`src/storage/`、`src/events/event-store.ts`
 - 测试位置：`tests/sqlite-*.test.ts`、`tests/file-artifact-store.test.ts`、`tests/artifact-file-deleter.test.ts`、`tests/session-deletion-service.test.ts`、`tests/retention-service.test.ts`、`tests/storage-recovery-inspector.test.ts`

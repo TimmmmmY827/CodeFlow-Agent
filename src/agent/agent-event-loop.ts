@@ -27,6 +27,8 @@ export interface CreatedSession {
 
 export interface RunReadonlySessionRequest extends ExecutionIdentity {
   readonly goal: string;
+  readonly workspaceId: StableId;
+  readonly authorizationVersion: string;
   readonly signal: AbortSignal;
   readonly deadlineAt?: UtcTimestamp | null;
 }
@@ -229,10 +231,12 @@ export class AgentEventLoop {
             deadlineAt: request.deadlineAt ?? null,
             sessionId: request.sessionId,
             taskId: request.taskId,
+            workspaceId: request.workspaceId,
+            authorizationVersion: request.authorizationVersion,
             traceId: request.traceId,
             ...(request.parentTaskId === undefined ? {} : { parentTaskId: request.parentTaskId }),
             ...(request.actorId === undefined ? {} : { actorId: request.actorId }),
-            taskWriteAuthorized: false,
+            taskAuthorization: null,
             approvalToken: null,
           });
           toolCalls += 1;
