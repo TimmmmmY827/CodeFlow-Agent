@@ -333,7 +333,7 @@ function normalizePathInput<TInput extends { readonly path: string }>(input: TIn
   const path = canonicalRelativePath(input.path);
   return {
     effectiveInput: { ...input, path },
-    transformations: path === input.path ? [] : [pathTransformation("path", input.path, path)],
+    transformations: path === input.path ? [] : [pathTransformation("/path", input.path, path)],
   };
 }
 
@@ -342,7 +342,7 @@ function normalizeOptionalPathInput<TInput extends { readonly path?: string | un
   const path = canonicalRelativePath(input.path);
   return {
     effectiveInput: { ...input, path },
-    transformations: path === input.path ? [] : [pathTransformation("path", input.path, path)],
+    transformations: path === input.path ? [] : [pathTransformation("/path", input.path, path)],
   };
 }
 
@@ -351,7 +351,7 @@ function normalizePathListInput<TInput extends { readonly paths: readonly string
   const changed = paths.some((path, index) => path !== input.paths[index]);
   return {
     effectiveInput: { ...input, paths },
-    transformations: changed ? [pathTransformation("paths", input.paths, paths)] : [],
+    transformations: changed ? [pathTransformation("/paths", input.paths, paths)] : [],
   };
 }
 

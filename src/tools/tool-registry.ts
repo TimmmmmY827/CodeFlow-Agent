@@ -33,7 +33,10 @@ export const toolAvailabilitySchema = z.object({
 });
 
 export const inputTransformationSchema = z.object({
-  field: z.string().trim().min(1).max(256),
+  field: z.string().trim().min(1).max(256).refine(
+    (value) => value === "$" || (value.startsWith("/") && !/~(?![01])/u.test(value)),
+    "Transformation fields must use an RFC 6901 JSON Pointer; $ is reserved for Runtime schema parsing.",
+  ),
   ruleCode: z.string().regex(/^[a-z][a-z0-9_]{0,127}$/),
   beforeHash: digestSchema,
   afterHash: digestSchema,

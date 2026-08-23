@@ -83,7 +83,7 @@ interface ToolCatalogManifest {
 }
 ```
 
-`normalizeInput` 只能做确定、无 I/O 的规范化，例如默认值、路径分隔符和稳定排序；不得在这里读取工作区或网络。每次变化必须提高 `normalizationVersion`。`InputTransformation` 记录字段、规则 code 和 before/after hash，不在普通 trace 中保存秘密原值。
+`normalizeInput` 只能做确定、无 I/O 的规范化，例如默认值、路径分隔符和稳定排序；不得在这里读取工作区或网络。每次变化必须提高 `normalizationVersion`。Provider 返回的 `InputTransformation.field` 使用 RFC 6901 JSON Pointer；`$` 仅保留给 Runtime 记录 Zod parse/default 造成的根级变化。Runtime 必须从 parsed/effective input 重算并核对每项 before/after hash，拒绝重复、缺失、伪造或未声明的变化；普通 trace 只保存 hash，不保存秘密原值。
 
 `ResourceClaim` 至少包含稳定资源 key、`read|write` 模式和作用域；C08 只根据这些声明判断并行，不从自然语言描述猜测冲突。
 

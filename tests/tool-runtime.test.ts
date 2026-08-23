@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { z } from "zod";
 import { describe, expect, it } from "vitest";
@@ -7,6 +7,7 @@ import type { AgentEvent } from "../src/events/agent-event.js";
 import type { ExecutionJournal, FinishExecutionInput } from "../src/events/execution-journal.js";
 import { PermissionEngine } from "../src/policy/permission-engine.js";
 import { createLegacyOperationHash } from "../src/policy/operation-hash.js";
+import { canonicalJson } from "../src/shared/json.js";
 import type { ArtifactWriter } from "../src/storage/storage.js";
 import { ToolRegistry } from "../src/tools/tool-registry.js";
 import { ToolRuntime, type ToolExecutionRequest } from "../src/tools/tool-runtime.js";
@@ -26,10 +27,10 @@ describe("ToolRuntime", () => {
       normalizeInput: (input) => ({
         effectiveInput: { path: input.path.trim() },
         transformations: [{
-          field: "path",
+          field: "/path",
           ruleCode: "trim_whitespace",
-          beforeHash: `sha256:${"a".repeat(64)}`,
-          afterHash: `sha256:${"b".repeat(64)}`,
+          beforeHash: digest(input.path),
+          afterHash: digest(input.path.trim()),
         }],
       }),
       claimResources: (input) => [{ key: `path:${input.path}`, mode: "read", scope: "path" }],
@@ -45,6 +46,41 @@ describe("ToolRuntime", () => {
       input: { path: "README.md" },
       codeVersion: "git:abc123",
     }));
+  });
+
+  it("rejects forged, duplicate, missing, and incomplete transformation evidence", async () => {
+    const cases = [
+      [{ field: "/path", ruleCode: "trim_whitespace", beforeHash: digest("forged"), afterHash: digest("README.md") }],
+      [
+        { field: "/path", ruleCode: "trim_whitespace", beforeHash: digest(" README.md "), afterHash: digest("README.md") },
+        { field: "/path", ruleCode: "duplicate", beforeHash: digest(" README.md "), afterHash: digest("README.md") },
+      ],
+      [{ field: "/missing", ruleCode: "wrong_field", beforeHash: digest(" README.md "), afterHash: digest("README.md") }],
+      [],
+    ] as const;
+
+    for (const [index, transformations] of cases.entries()) {
+      const registry = new ToolRegistry();
+      let executions = 0;
+      registerTool(registry, {
+        name: `forged_transform_${index}`,
+        description: "Reject forged transformation evidence",
+        risk: "automatic",
+        sideEffect: "none",
+        retryPolicy: "safe",
+        inputSchema: z.object({ path: z.string() }),
+        normalizeInput: () => ({ effectiveInput: { path: "README.md" }, transformations }),
+        execute: async () => { executions += 1; return { ok: true }; },
+      });
+
+      await expect(new ToolRuntime(registry, new PermissionEngine()).execute(
+        request(`forged_transform_${index}`, { path: " README.md " }),
+      )).resolves.toMatchObject({
+        status: "failed",
+        error: { category: "input_transformation_invalid" },
+      });
+      expect(executions).toBe(0);
+    }
   });
 
   it("rejects unavailable tools, invalid resource claims, and invalid output before reporting completion", async () => {
@@ -422,4 +458,8 @@ function registerTool<TInput, TOutput>(registry: ToolRegistry, tool: TestTool<TI
       scope: "workspace",
     }]),
   });
+}
+
+function digest(value: unknown): string {
+  return `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}`;
 }

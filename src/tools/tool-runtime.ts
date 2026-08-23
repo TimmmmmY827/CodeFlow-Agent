@@ -170,20 +170,20 @@ export class ToolRuntime {
           sideEffectBeforeExecution(tool.sideEffect),
         );
       }
-      const parsedTransformations = inputTransformationSchema.array().safeParse([
-        ...schemaTransformations,
-        ...normalized.transformations,
-      ]);
-      if (!parsedTransformations.success) {
-        return failure(tool.name, "", 0, "input_transformation_invalid", "Tool input transformations are invalid.", false, "failed", sideEffectBeforeExecution(tool.sideEffect));
+      effectiveInputHash = digestJson(effective.data);
+      const declaredTransformations = inputTransformationSchema.array().safeParse(normalized.transformations);
+      if (
+        !declaredTransformations.success ||
+        !verifyDeclaredTransformations(parsed.data, effective.data, declaredTransformations.data)
+      ) {
+        return failure(tool.name, "", 0, "input_transformation_invalid", "Tool input transformations do not match the normalized input facts.", false, "failed", sideEffectBeforeExecution(tool.sideEffect));
       }
       const parsedClaims = resourceClaimSchema.array().min(1).safeParse(tool.claimResources(effective.data));
       if (!parsedClaims.success || new Set(parsedClaims.success ? parsedClaims.data.map((claim) => `${claim.scope}:${claim.mode}:${claim.key}`) : []).size !== (parsedClaims.success ? parsedClaims.data.length : 0)) {
         return failure(tool.name, "", 0, "resource_claim_invalid", "Tool resource claims are invalid or duplicated.", false, "failed", sideEffectBeforeExecution(tool.sideEffect));
       }
       effectiveInput = effective.data;
-      effectiveInputHash = digestJson(effective.data);
-      transformations = parsedTransformations.data;
+      transformations = [...schemaTransformations, ...declaredTransformations.data];
       resourceClaims = parsedClaims.data;
     } catch (error: unknown) {
       return failure(
@@ -559,6 +559,75 @@ function envelope(
 
 function digestJson(value: unknown): string {
   return `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}`;
+}
+
+function verifyDeclaredTransformations(
+  before: unknown,
+  after: unknown,
+  transformations: readonly InputTransformation[],
+): boolean {
+  const fields = new Set<string>();
+  for (const transformation of transformations) {
+    if (transformation.field === "$" || fields.has(transformation.field)) return false;
+    fields.add(transformation.field);
+    const beforeFact = resolveJsonPointer(before, transformation.field);
+    const afterFact = resolveJsonPointer(after, transformation.field);
+    if (!beforeFact.found || !afterFact.found) return false;
+    if (
+      digestJson(beforeFact.value) !== transformation.beforeHash ||
+      digestJson(afterFact.value) !== transformation.afterHash ||
+      transformation.beforeHash === transformation.afterHash
+    ) return false;
+  }
+
+  const changedPointers = collectChangedPointers(before, after);
+  return changedPointers.every((pointer) => transformations.some((transformation) => (
+    pointer === transformation.field || pointer.startsWith(`${transformation.field}/`)
+  )));
+}
+
+function resolveJsonPointer(value: unknown, pointer: string): { readonly found: boolean; readonly value?: unknown } {
+  let current = value;
+  for (const token of pointer.slice(1).split("/").map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"))) {
+    if (Array.isArray(current)) {
+      if (!/^(?:0|[1-9]\d*)$/u.test(token)) return { found: false };
+      const index = Number(token);
+      if (index >= current.length) return { found: false };
+      current = current[index];
+    } else if (isPlainObject(current) && Object.hasOwn(current, token)) {
+      current = current[token];
+    } else {
+      return { found: false };
+    }
+  }
+  return { found: true, value: current };
+}
+
+function collectChangedPointers(before: unknown, after: unknown, pointer = "$"): readonly string[] {
+  if (canonicalJson(before) === canonicalJson(after)) return [];
+  if (Array.isArray(before) && Array.isArray(after) && before.length === after.length) {
+    return before.flatMap((value, index) => collectChangedPointers(
+      value,
+      after[index],
+      pointer === "$" ? `/${index}` : `${pointer}/${index}`,
+    ));
+  }
+  if (isPlainObject(before) && isPlainObject(after)) {
+    const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort();
+    return keys.flatMap((key) => {
+      const escaped = key.replaceAll("~", "~0").replaceAll("/", "~1");
+      const childPointer = pointer === "$" ? `/${escaped}` : `${pointer}/${escaped}`;
+      if (!Object.hasOwn(before, key) || !Object.hasOwn(after, key)) return [childPointer];
+      return collectChangedPointers(before[key], after[key], childPointer);
+    });
+  }
+  return [pointer];
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && (
+    Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null
+  );
 }
 
 function failure(
