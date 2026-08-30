@@ -6,9 +6,9 @@ import { TextDecoder } from "node:util";
 
 import { z } from "zod";
 
-import type { StructuredError } from "../../shared/contracts.js";
-import type { JsonObject } from "../../shared/json.js";
-import type { AnyToolDefinition, ToolDefinition, ToolExecutionContext } from "../tool.js";
+import { systemClock, type StructuredError } from "../../shared/contracts.js";
+import { canonicalJson } from "../../shared/json.js";
+import type { AnyToolDefinition, NormalizedToolInput, ResourceClaim, ToolDefinition, ToolExecutionContext } from "../tool.js";
 import { ToolExecutionError } from "../tool.js";
 import type { ToolRegistry } from "../tool-registry.js";
 
@@ -67,6 +67,66 @@ const gitLogInputSchema = z.object({
   }
 });
 
+const listFilesOutputSchema = z.object({
+  entries: z.array(z.object({
+    path: z.string(),
+    type: z.enum(["file", "directory"]),
+    size: z.number().int().nonnegative().nullable(),
+  }).strict()),
+  truncated: z.boolean(),
+  skippedLinks: z.number().int().nonnegative(),
+}).strict();
+
+const searchTextOutputSchema = z.object({
+  matches: z.array(z.object({
+    path: z.string(),
+    line: z.number().int().nonnegative(),
+    column: z.number().int().nonnegative(),
+    text: z.string(),
+  }).strict()),
+  truncated: z.boolean(),
+  backend: z.enum(["ripgrep", "node"]),
+}).strict();
+
+const readFileOutputSchema = z.object({
+  path: z.string(),
+  startLine: z.number().int().positive(),
+  endLine: z.number().int().nonnegative(),
+  totalLines: z.number().int().nonnegative(),
+  content: z.string(),
+  truncated: z.boolean(),
+  sha256: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  byteLength: z.number().int().nonnegative(),
+}).strict();
+
+const gitStatusOutputSchema = z.object({
+  clean: z.boolean(),
+  entries: z.array(z.object({
+    status: z.string(),
+    path: z.string(),
+    originalPath: z.string().nullable().optional(),
+  }).strict()),
+  truncated: z.boolean(),
+}).strict();
+
+const gitDiffOutputSchema = z.object({
+  scope: z.enum(["working", "staged", "base"]),
+  base: z.string().nullable(),
+  diff: z.string(),
+  truncated: z.boolean(),
+  contentSha256: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+}).strict();
+
+const gitLogOutputSchema = z.object({
+  commits: z.array(z.object({
+    hash: z.string(),
+    authoredAt: z.string(),
+    author: z.string(),
+    subject: z.string(),
+  }).strict()),
+  truncated: z.boolean(),
+}).strict();
+
 const IGNORED_DIRECTORIES = new Set([".git", ".codeflow", "node_modules", "dist", "artifacts"]);
 const SEARCH_TIMEOUT_MS = 10_000;
 const SEARCH_MAX_FILES = 10_000;
@@ -93,8 +153,8 @@ export function registerWorkspaceReadTools(registry: ToolRegistry, options: Work
   for (const tool of createWorkspaceReadTools(options)) registry.register(tool);
 }
 
-export function createListFilesTool(): ToolDefinition<z.infer<typeof listFilesInputSchema>, JsonObject> {
-  return readOnlyTool("list_files", "List bounded files and directories inside the workspace.", listFilesInputSchema, async (input, context) => {
+export function createListFilesTool(): ToolDefinition<z.infer<typeof listFilesInputSchema>, z.infer<typeof listFilesOutputSchema>> {
+  return readOnlyTool("list_files", "List bounded files and directories inside the workspace.", listFilesInputSchema, listFilesOutputSchema, normalizePathInput, (input) => pathClaim(input.path), async (input, context) => {
     const boundary = await resolveWorkspacePath(context.workspace, input.path, true);
     const entries: { path: string; type: "file" | "directory"; size: number | null }[] = [];
     let truncated = false;
@@ -134,8 +194,8 @@ export function createListFilesTool(): ToolDefinition<z.infer<typeof listFilesIn
   });
 }
 
-export function createSearchTextTool(options: WorkspaceReadToolOptions = {}): ToolDefinition<z.infer<typeof searchTextInputSchema>, JsonObject> {
-  return readOnlyTool("search_text", "Search bounded UTF-8 workspace text with ripgrep.", searchTextInputSchema, async (input, context) => {
+export function createSearchTextTool(options: WorkspaceReadToolOptions = {}): ToolDefinition<z.infer<typeof searchTextInputSchema>, z.infer<typeof searchTextOutputSchema>> {
+  return readOnlyTool("search_text", "Search bounded UTF-8 workspace text with ripgrep.", searchTextInputSchema, searchTextOutputSchema, normalizePathInput, (input) => pathClaim(input.path), async (input, context) => {
     const boundary = await resolveWorkspacePath(context.workspace, input.path, true);
     const args = ["--line-number", "--column", "--no-heading", "--color", "never", "--glob", "!.git/**", "--glob", "!.codeflow/**", "--glob", "!node_modules/**", "--glob", "!dist/**", "--glob", "!artifacts/**"];
     if (!input.regex) args.push("--fixed-strings");
@@ -153,8 +213,8 @@ export function createSearchTextTool(options: WorkspaceReadToolOptions = {}): To
   });
 }
 
-export function createReadFileTool(): ToolDefinition<z.infer<typeof readFileInputSchema>, JsonObject> {
-  return readOnlyTool("read_file", "Read a bounded UTF-8 file with line metadata and SHA-256 evidence.", readFileInputSchema, async (input, context) => {
+export function createReadFileTool(): ToolDefinition<z.infer<typeof readFileInputSchema>, z.infer<typeof readFileOutputSchema>> {
+  return readOnlyTool("read_file", "Read a bounded UTF-8 file with line metadata and SHA-256 evidence.", readFileInputSchema, readFileOutputSchema, normalizePathInput, (input) => pathClaim(input.path), async (input, context) => {
     const boundary = await resolveWorkspacePath(context.workspace, input.path, false);
     assertActive(context);
     const metadata = await lstat(boundary.candidate);
@@ -194,8 +254,8 @@ export function createReadFileTool(): ToolDefinition<z.infer<typeof readFileInpu
   });
 }
 
-export function createGitStatusTool(): ToolDefinition<Record<string, never>, JsonObject> {
-  return readOnlyTool("git_status", "Return machine-readable Git working tree status.", z.object({}).strict(), async (_input, context) => {
+export function createGitStatusTool(): ToolDefinition<Record<string, never>, z.infer<typeof gitStatusOutputSchema>> {
+  return readOnlyTool("git_status", "Return machine-readable Git working tree status.", z.object({}).strict(), gitStatusOutputSchema, identityNormalization, repositoryClaim, async (_input, context) => {
     const root = await assertGitWorkspace(context);
     const result = await runGitCommand(["status", "--porcelain=v1", "-z", "--untracked-files=normal", "--", "./"], root, context, 256_000, [0]);
     const records = parseGitStatus(result.stdout);
@@ -203,8 +263,8 @@ export function createGitStatusTool(): ToolDefinition<Record<string, never>, Jso
   });
 }
 
-export function createGitDiffTool(): ToolDefinition<z.infer<typeof gitDiffInputSchema>, JsonObject> {
-  return readOnlyTool("git_diff", "Return a bounded working, staged, or base Git diff.", gitDiffInputSchema, async (input, context) => {
+export function createGitDiffTool(): ToolDefinition<z.infer<typeof gitDiffInputSchema>, z.infer<typeof gitDiffOutputSchema>> {
+  return readOnlyTool("git_diff", "Return a bounded working, staged, or base Git diff.", gitDiffInputSchema, gitDiffOutputSchema, normalizePathListInput, repositoryClaim, async (input, context) => {
     const root = await assertGitWorkspace(context);
     for (const path of input.paths) await resolveWorkspacePath(root, path, true, false);
     const args = ["diff", "--no-ext-diff", "--no-color", "--unified=3"];
@@ -222,8 +282,8 @@ export function createGitDiffTool(): ToolDefinition<z.infer<typeof gitDiffInputS
   });
 }
 
-export function createGitLogTool(): ToolDefinition<z.infer<typeof gitLogInputSchema>, JsonObject> {
-  return readOnlyTool("git_log", "Return bounded Git history with fixed fields.", gitLogInputSchema, async (input, context) => {
+export function createGitLogTool(): ToolDefinition<z.infer<typeof gitLogInputSchema>, z.infer<typeof gitLogOutputSchema>> {
+  return readOnlyTool("git_log", "Return bounded Git history with fixed fields.", gitLogInputSchema, gitLogOutputSchema, normalizeOptionalPathInput, repositoryClaim, async (input, context) => {
     const root = await assertGitWorkspace(context);
     if (input.path) await resolveWorkspacePath(root, input.path, true, false);
     const args = ["log", `--max-count=${input.maxCount}`, "--format=%H%x1f%aI%x1f%an%x1f%s%x1e"];
@@ -239,13 +299,91 @@ export function createGitLogTool(): ToolDefinition<z.infer<typeof gitLogInputSch
   });
 }
 
-function readOnlyTool<TInput>(
+function readOnlyTool<TInput, TOutput>(
   name: string,
   description: string,
   inputSchema: z.ZodType<TInput>,
-  execute: (input: TInput, context: ToolExecutionContext) => Promise<JsonObject>,
-): ToolDefinition<TInput, JsonObject> {
-  return { name, description, risk: "automatic", sideEffect: "none", retryPolicy: "safe", inputSchema, execute };
+  outputSchema: z.ZodType<TOutput>,
+  normalizeInput: (input: TInput) => NormalizedToolInput<TInput>,
+  claimResources: (input: TInput) => readonly ResourceClaim[],
+  execute: (input: TInput, context: ToolExecutionContext) => Promise<TOutput>,
+): ToolDefinition<TInput, TOutput> {
+  return {
+    name,
+    version: `tool:${name}@1.0.0`,
+    normalizationVersion: "normalization:workspace-read-v1",
+    description,
+    risk: "automatic",
+    sideEffect: "none",
+    retryPolicy: "safe",
+    inputSchema,
+    outputSchema,
+    availability: { available: true, reasonCode: null, message: null, checkedAt: systemClock.utcNow() },
+    normalizeInput,
+    claimResources,
+    execute,
+  };
+}
+
+function identityNormalization<TInput>(input: TInput): NormalizedToolInput<TInput> {
+  return { effectiveInput: input, transformations: [] };
+}
+
+function normalizePathInput<TInput extends { readonly path: string }>(input: TInput): NormalizedToolInput<TInput> {
+  const path = canonicalRelativePath(input.path);
+  return {
+    effectiveInput: { ...input, path },
+    transformations: path === input.path ? [] : [pathTransformation("/path", input.path, path)],
+  };
+}
+
+function normalizeOptionalPathInput<TInput extends { readonly path?: string | undefined }>(input: TInput): NormalizedToolInput<TInput> {
+  if (input.path === undefined) return identityNormalization(input);
+  const path = canonicalRelativePath(input.path);
+  return {
+    effectiveInput: { ...input, path },
+    transformations: path === input.path ? [] : [pathTransformation("/path", input.path, path)],
+  };
+}
+
+function normalizePathListInput<TInput extends { readonly paths: readonly string[] }>(input: TInput): NormalizedToolInput<TInput> {
+  const paths = input.paths.map(canonicalRelativePath);
+  const changed = paths.some((path, index) => path !== input.paths[index]);
+  return {
+    effectiveInput: { ...input, paths },
+    transformations: changed ? [pathTransformation("/paths", input.paths, paths)] : [],
+  };
+}
+
+function canonicalRelativePath(value: string): string {
+  const segments: string[] = [];
+  for (const segment of value.replaceAll("\\", "/").split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === ".." && segments.length > 0 && segments.at(-1) !== "..") segments.pop();
+    else segments.push(segment);
+  }
+  return segments.join("/") || ".";
+}
+
+function pathTransformation(field: string, before: unknown, after: unknown) {
+  return {
+    field,
+    ruleCode: "normalize_relative_path_v1",
+    beforeHash: digestCanonical(before),
+    afterHash: digestCanonical(after),
+  } as const;
+}
+
+function digestCanonical(value: unknown): string {
+  return `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}`;
+}
+
+function pathClaim(path: string): readonly ResourceClaim[] {
+  return [{ key: `path:${path.replaceAll("\\", "/")}`, mode: "read", scope: "path" }];
+}
+
+function repositoryClaim(): readonly ResourceClaim[] {
+  return [{ key: "repository:workspace", mode: "read", scope: "repository" }];
 }
 
 async function resolveWorkspacePath(
@@ -297,15 +435,15 @@ function normalizeRelative(root: string, candidate: string): string {
   return value || ".";
 }
 
-function parseSearchMatch(line: string): JsonObject {
+function parseSearchMatch(line: string): z.infer<typeof searchTextOutputSchema>["matches"][number] {
   const match = /^(.+?):(\d+):(\d+):(.*)$/u.exec(line);
   if (!match) return { path: "", line: 0, column: 0, text: line };
   return { path: (match[1] ?? "").replaceAll("\\", "/"), line: Number(match[2]), column: Number(match[3]), text: match[4] ?? "" };
 }
 
-function parseGitStatus(output: string): readonly JsonObject[] {
+function parseGitStatus(output: string): z.infer<typeof gitStatusOutputSchema>["entries"] {
   const tokens = output.split("\0");
-  const records: JsonObject[] = [];
+  const records: z.infer<typeof gitStatusOutputSchema>["entries"] = [];
   for (let index = 0; index < tokens.length; index += 1) {
     const record = tokens[index];
     if (!record) continue;
@@ -440,9 +578,9 @@ async function searchTextWithoutRipgrep(
   boundary: { root: string; candidate: string },
   input: z.infer<typeof searchTextInputSchema>,
   context: ToolExecutionContext,
-): Promise<JsonObject> {
+): Promise<z.infer<typeof searchTextOutputSchema>> {
   const startedAt = Date.now();
-  const matches: JsonObject[] = [];
+  const matches: z.infer<typeof searchTextOutputSchema>["matches"] = [];
   let fileCount = 0;
   let totalBytes = 0;
   let truncated = false;

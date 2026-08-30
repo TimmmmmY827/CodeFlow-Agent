@@ -52,6 +52,7 @@ export type {
 export {
   CompletionGate,
   completionClaimSchema,
+  completionDecisionSchema,
   safetyVetoSchema,
 } from "./completion/completion-gate.js";
 export type {
@@ -252,10 +253,37 @@ export {
 } from "./storage/sqlite/sqlite-approval-repository.js";
 export * from "./shared/index.js";
 export * from "./storage/storage.js";
-export { ToolRegistry } from "./tools/tool-registry.js";
-export type { ProjectedToolDefinition } from "./tools/tool-registry.js";
+export {
+  TOOL_CATALOG_SCHEMA_VERSION,
+  ToolRegistry,
+  inputTransformationSchema,
+  resourceClaimSchema,
+  toolAvailabilitySchema,
+  toolCatalogManifestSchema,
+  toolContractIdentitySchema,
+} from "./tools/tool-registry.js";
+export type {
+  ProjectedToolDefinition,
+  ToolCatalogEntry,
+  ToolCatalogManifest,
+} from "./tools/tool-registry.js";
 export { ToolRuntime } from "./tools/tool-runtime.js";
 export { ToolExecutionError } from "./tools/tool.js";
+export type {
+  AnyRegisteredToolDefinition,
+  AnyToolDefinition,
+  InputTransformation,
+  NormalizedToolInput,
+  RegisteredToolDefinition,
+  ResourceClaim,
+  ToolAvailability,
+  ToolContractIdentity,
+  ToolDefinition,
+  ToolExecutionContext,
+  ToolRetryPolicy,
+  ToolRisk,
+  ToolSideEffect,
+} from "./tools/tool.js";
 export { createFinishTaskTool } from "./tools/builtin/finish-task.js";
 export {
   createGitDiffTool,

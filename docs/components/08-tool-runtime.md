@@ -1,6 +1,6 @@
 # C08 ToolRuntime
 
-- 状态：输入校验、权限、hash、执行、JSON 边界和 Artifact 外置基础已实现；toolVersion、outputSchema、timeout、预算/事件持久化和故障恢复缺失
+- 状态：输入校验与规范化、资源声明、权限、legacy hash、输出 schema、执行、JSON 边界和 Artifact 外置基础已实现；完整 OperationBinding、资源锁、timeout、预算事务和故障恢复缺失
 - 目标阶段：D3–D4
 - 代码位置：`src/tools/tool-runtime.ts`
 - 硬依赖：[C00](00-shared-contracts.md)、[C01](01-event-state.md)、[C02](02-storage-artifacts.md)、[C03](03-permission-engine.md)、[C04](04-budget-controller.md)、[C07](07-tool-registry.md)
@@ -30,13 +30,14 @@
 ### 3.1 当前可编译流水线
 
 ```text
-lookup -> validate input -> canonical operation hash -> cancellation check
+lookup/availability -> validate input -> normalize + validate resource claims
+ -> legacy operation hash over effective input -> cancellation check
  -> legacy permission adapter -> check/consume in-memory approval -> emit started
- -> execute -> JSON serialization boundary -> inline or ArtifactStore
+ -> execute -> validate output schema -> JSON serialization boundary -> inline or ArtifactStore
  -> emit finished -> return envelope
 ```
 
-当前 Runtime 尚未接 budget reservation、per-tool timeout、outputSchema 或持久化 event；observer/ArtifactStore 失败后的证据恢复也未完成。C03 已提供完整 OperationBinding、持久审批 repository 和 SQLite 消费原语，C04 已提供 `SqliteBudgetLedger.reserveWithinTransaction/commitWithinTransaction` 等同步事务原语，但当前 Runtime 尚未组装，仍使用显式 legacy hash/permission 入口与进程内消费；该入口不得被新调用方采用。
+当前 Runtime 已从 C07 同一注册事实取得 tool version、input/output schema hash、normalization version、transformation ledger 和 resource claims；Zod 默认值/trim 等 schema 变换会以根级 hash ledger 记录，工具规范化继续记录字段级 hash ledger。durable journal begin payload 会记录完整 tool contract、requested/effective input hash、变换和资源声明，执行只使用再次通过 input schema 的 effective input，输出必须通过 output schema 后才可进入 JSON/Artifact 边界。Runtime 尚未接完整 OperationBinding、资源锁、budget reservation、per-tool timeout 或恢复对账；observer/ArtifactStore 失败后的证据恢复也未完成。C03 已提供完整 OperationBinding、持久审批 repository 和 SQLite 消费原语，C04 已提供 `SqliteBudgetLedger.reserveWithinTransaction/commitWithinTransaction` 等同步事务原语，但当前 Runtime 尚未组装，仍使用显式 legacy hash/permission 入口与进程内消费；该入口不得被新调用方采用。
 
 ### 3.2 目标流水线（规划中）
 
@@ -111,7 +112,7 @@ journal 只能写 C01 已登记的事件：succeeded 映射 `tool.completed`；f
 
 ### 4.1 当前可编译基线
 
-当前 `ToolResultEnvelope` 没有 `toolVersion`；Runtime 只验证输出可 JSON 序列化，没有 `outputSchema`。默认 inline 上限和 Artifact 外置已实现，但 per-tool timeout、环境 allowlist、预算 reservation、持久化批准消费与事件 writer 尚未接入。
+当前 `ToolResultEnvelope` 仍没有 `toolVersion`，但 Runtime 已在执行结果封装前按注册定义验证 `outputSchema`，并在 journal begin payload 记录 tool version 与 contract hash。默认 inline 上限和 Artifact 外置已实现，但 per-tool timeout、环境 allowlist、预算 reservation、持久化批准消费与完整版本化结果 envelope 尚未接入。
 
 ```ts
 interface ToolResultEnvelope {

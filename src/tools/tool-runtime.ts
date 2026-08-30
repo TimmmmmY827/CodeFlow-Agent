@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 
 import type { ExecutionJournal, ExecutionLease } from "../events/execution-journal.js";
 import { budgetDeltaSchema } from "../policy/budget-contracts.js";
@@ -14,9 +15,10 @@ import {
   type StructuredError,
   type UtcTimestamp,
 } from "../shared/contracts.js";
-import { validateJsonValue, type JsonValue } from "../shared/json.js";
+import { canonicalJson, validateJsonValue, type JsonObject, type JsonValue } from "../shared/json.js";
 import type { ArtifactReference, ArtifactWriter } from "../storage/storage.js";
-import type { ToolRegistry } from "./tool-registry.js";
+import { inputTransformationSchema, resourceClaimSchema, type ToolRegistry } from "./tool-registry.js";
+import type { AnyRegisteredToolDefinition, InputTransformation, ResourceClaim } from "./tool.js";
 import { ToolExecutionError } from "./tool.js";
 
 export type ToolRuntimeStatus =
@@ -96,6 +98,19 @@ export class ToolRuntime {
     if (!tool) {
       return failure(request.toolName, "", 0, "unknown_tool", "Tool is not registered.", false, "failed", "none");
     }
+    if (!tool.availability.available) {
+      return failure(
+        tool.name,
+        "",
+        0,
+        "tool_unavailable",
+        tool.availability.message ?? "Tool is unavailable in the current environment.",
+        false,
+        "failed",
+        sideEffectBeforeExecution(tool.sideEffect),
+        tool.availability.reasonCode === null ? null : `Resolve availability reason ${tool.availability.reasonCode} before retrying.`,
+      );
+    }
 
     const parsed = tool.inputSchema.safeParse(request.input);
     if (!parsed.success) {
@@ -111,11 +126,83 @@ export class ToolRuntime {
       );
     }
 
+    let requestedInputHash: string;
+    let schemaTransformations: readonly InputTransformation[];
+    try {
+      requestedInputHash = digestJson(request.input);
+      const parsedInputHash = digestJson(parsed.data);
+      schemaTransformations = requestedInputHash === parsedInputHash ? [] : [{
+        field: "$",
+        ruleCode: "schema_parse_v1",
+        beforeHash: requestedInputHash,
+        afterHash: parsedInputHash,
+      }];
+    } catch (error: unknown) {
+      return failure(
+        tool.name,
+        "",
+        0,
+        "not_json_serializable",
+        error instanceof Error ? error.message : String(error),
+        false,
+        "failed",
+        sideEffectBeforeExecution(tool.sideEffect),
+        "Use JSON-serializable tool input.",
+      );
+    }
+
+    let effectiveInput: unknown;
+    let effectiveInputHash: string;
+    let transformations: readonly InputTransformation[];
+    let resourceClaims: readonly ResourceClaim[];
+    try {
+      const normalized = tool.normalizeInput(parsed.data);
+      const effective = tool.inputSchema.safeParse(normalized.effectiveInput);
+      if (!effective.success) {
+        return failure(
+          tool.name,
+          "",
+          0,
+          "normalized_input_invalid",
+          effective.error.issues.map((issue) => issue.message).join("; "),
+          false,
+          "failed",
+          sideEffectBeforeExecution(tool.sideEffect),
+        );
+      }
+      effectiveInputHash = digestJson(effective.data);
+      const declaredTransformations = inputTransformationSchema.array().safeParse(normalized.transformations);
+      if (
+        !declaredTransformations.success ||
+        !verifyDeclaredTransformations(parsed.data, effective.data, declaredTransformations.data)
+      ) {
+        return failure(tool.name, "", 0, "input_transformation_invalid", "Tool input transformations do not match the normalized input facts.", false, "failed", sideEffectBeforeExecution(tool.sideEffect));
+      }
+      const parsedClaims = resourceClaimSchema.array().min(1).safeParse(tool.claimResources(effective.data));
+      if (!parsedClaims.success || new Set(parsedClaims.success ? parsedClaims.data.map((claim) => `${claim.scope}:${claim.mode}:${claim.key}`) : []).size !== (parsedClaims.success ? parsedClaims.data.length : 0)) {
+        return failure(tool.name, "", 0, "resource_claim_invalid", "Tool resource claims are invalid or duplicated.", false, "failed", sideEffectBeforeExecution(tool.sideEffect));
+      }
+      effectiveInput = effective.data;
+      transformations = [...schemaTransformations, ...declaredTransformations.data];
+      resourceClaims = parsedClaims.data;
+    } catch (error: unknown) {
+      return failure(
+        tool.name,
+        "",
+        0,
+        "input_normalization_failed",
+        error instanceof Error ? error.message : String(error),
+        false,
+        "failed",
+        sideEffectBeforeExecution(tool.sideEffect),
+      );
+    }
+
     let operationHash: string;
     try {
       operationHash = createLegacyOperationHash({
         toolName: tool.name,
-        input: parsed.data,
+        input: effectiveInput,
         codeVersion: request.codeVersion,
       });
     } catch (error: unknown) {
@@ -195,6 +282,17 @@ export class ToolRuntime {
         return failure(tool.name, operationHash, 0, "journal_context_missing", "Durable tool execution requires a traceId.", false);
       }
       try {
+        const transformationFacts: readonly JsonObject[] = transformations.map((item) => ({
+          field: item.field,
+          ruleCode: item.ruleCode,
+          beforeHash: item.beforeHash,
+          afterHash: item.afterHash,
+        }));
+        const resourceFacts: readonly JsonObject[] = resourceClaims.map((item) => ({
+          key: item.key,
+          mode: item.mode,
+          scope: item.scope,
+        }));
         journalLease = await this.#journal.begin({
           identity: {
             sessionId: request.sessionId,
@@ -211,7 +309,20 @@ export class ToolRuntime {
           name: tool.name,
           operationHash,
           estimate: budgetDeltaSchema.parse({ toolCalls: 1 }),
-          payload: { toolName: tool.name },
+          payload: {
+            toolName: tool.name,
+            toolContract: {
+              name: tool.contract.name,
+              version: tool.contract.version,
+              inputSchemaHash: tool.contract.inputSchemaHash,
+              outputSchemaHash: tool.contract.outputSchemaHash,
+              normalizationVersion: tool.contract.normalizationVersion,
+            },
+            requestedInputHash,
+            effectiveInputHash,
+            transformations: transformationFacts,
+            resourceClaims: resourceFacts,
+          },
         });
       } catch (error: unknown) {
         const details = errorDetails(error, "tool_journal_begin_failed", "The durable tool start could not be recorded.");
@@ -254,7 +365,7 @@ export class ToolRuntime {
 
     let result: ToolResultEnvelope;
     try {
-      const output = await tool.execute(parsed.data, {
+      const output = await tool.execute(effectiveInput, {
         workspace: request.workspace,
         codeVersion: request.codeVersion,
         configVersion: request.configVersion,
@@ -266,7 +377,7 @@ export class ToolRuntime {
       });
       const durationMs = elapsedMilliseconds(startedAt, systemClock.monotonicNowMs());
       result = await this.#packageOutput(
-        tool.name,
+        tool,
         operationHash,
         durationMs,
         output,
@@ -343,17 +454,31 @@ export class ToolRuntime {
   }
 
   async #packageOutput(
-    toolName: string,
+    tool: AnyRegisteredToolDefinition,
     operationHash: string,
     durationMs: number,
     output: unknown,
     sessionId: StableId,
     sideEffectStatus: "none" | "applied",
   ): Promise<ToolResultEnvelope> {
-    const validated = validateJsonValue(output);
+    const parsedOutput = tool.outputSchema.safeParse(output);
+    if (!parsedOutput.success) {
+      return failure(
+        tool.name,
+        operationHash,
+        durationMs,
+        "invalid_tool_output",
+        parsedOutput.error.issues.map((issue) => issue.message).join("; "),
+        false,
+        "failed",
+        sideEffectStatus,
+        "Fix the registered tool implementation or output schema before retrying.",
+      );
+    }
+    const validated = validateJsonValue(parsedOutput.data);
     if (!validated.ok) {
       return failure(
-        toolName,
+        tool.name,
         operationHash,
         durationMs,
         validated.error.category,
@@ -368,7 +493,7 @@ export class ToolRuntime {
     const content = Buffer.from(serialized, "utf8");
     if (content.byteLength <= this.#maxInlineBytes) {
       return envelope(
-        toolName,
+        tool.name,
         operationHash,
         "completed",
         durationMs,
@@ -380,7 +505,7 @@ export class ToolRuntime {
     }
     if (!this.#artifactStore) {
       return failure(
-        toolName,
+        tool.name,
         operationHash,
         durationMs,
         "artifact_store_unavailable",
@@ -397,7 +522,7 @@ export class ToolRuntime {
       content,
       "normal",
     );
-    return envelope(toolName, operationHash, "completed", durationMs, sideEffectStatus, null, artifact, null);
+    return envelope(tool.name, operationHash, "completed", durationMs, sideEffectStatus, null, artifact, null);
   }
 
   async #notify(event: ToolRuntimeEvent): Promise<void> {
@@ -430,6 +555,79 @@ function envelope(
     artifact,
     error,
   };
+}
+
+function digestJson(value: unknown): string {
+  return `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}`;
+}
+
+function verifyDeclaredTransformations(
+  before: unknown,
+  after: unknown,
+  transformations: readonly InputTransformation[],
+): boolean {
+  const fields = new Set<string>();
+  for (const transformation of transformations) {
+    if (transformation.field === "$" || fields.has(transformation.field)) return false;
+    fields.add(transformation.field);
+    const beforeFact = resolveJsonPointer(before, transformation.field);
+    const afterFact = resolveJsonPointer(after, transformation.field);
+    if (!beforeFact.found || !afterFact.found) return false;
+    if (
+      digestJson(beforeFact.value) !== transformation.beforeHash ||
+      digestJson(afterFact.value) !== transformation.afterHash ||
+      transformation.beforeHash === transformation.afterHash
+    ) return false;
+  }
+
+  const changedPointers = collectChangedPointers(before, after);
+  return changedPointers.every((pointer) => transformations.some((transformation) => (
+    pointer === transformation.field || pointer.startsWith(`${transformation.field}/`)
+  )));
+}
+
+function resolveJsonPointer(value: unknown, pointer: string): { readonly found: boolean; readonly value?: unknown } {
+  let current = value;
+  for (const token of pointer.slice(1).split("/").map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"))) {
+    if (Array.isArray(current)) {
+      if (!/^(?:0|[1-9]\d*)$/u.test(token)) return { found: false };
+      const index = Number(token);
+      if (index >= current.length) return { found: false };
+      current = current[index];
+    } else if (isPlainObject(current) && Object.hasOwn(current, token)) {
+      current = current[token];
+    } else {
+      return { found: false };
+    }
+  }
+  return { found: true, value: current };
+}
+
+function collectChangedPointers(before: unknown, after: unknown, pointer = "$"): readonly string[] {
+  if (canonicalJson(before) === canonicalJson(after)) return [];
+  if (Array.isArray(before) && Array.isArray(after) && before.length === after.length) {
+    return before.flatMap((value, index) => collectChangedPointers(
+      value,
+      after[index],
+      pointer === "$" ? `/${index}` : `${pointer}/${index}`,
+    ));
+  }
+  if (isPlainObject(before) && isPlainObject(after)) {
+    const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort();
+    return keys.flatMap((key) => {
+      const escaped = key.replaceAll("~", "~0").replaceAll("/", "~1");
+      const childPointer = pointer === "$" ? `/${escaped}` : `${pointer}/${escaped}`;
+      if (!Object.hasOwn(before, key) || !Object.hasOwn(after, key)) return [childPointer];
+      return collectChangedPointers(before[key], after[key], childPointer);
+    });
+  }
+  return [pointer];
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && (
+    Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null
+  );
 }
 
 function failure(

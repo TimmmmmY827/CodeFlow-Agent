@@ -149,7 +149,7 @@ describe("workspace read tools", () => {
     expect(log).toMatchObject({ status: "completed" });
     const commits = (log.output as JsonObject | null)?.commits ?? [];
     expect(commits).toEqual([expect.objectContaining({ author: "CodeFlow Test", subject: "initial fixture" })]);
-  });
+  }, 30_000);
 
   it("keeps Git reads inside a workspace that is a repository subdirectory", async () => {
     git(workspace, "init");

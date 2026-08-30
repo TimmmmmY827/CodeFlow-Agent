@@ -106,7 +106,7 @@ export async function startReadonlySession(
   const registry = new ToolRegistry();
   registerWorkspaceReadTools(registry);
   const budgetPolicy = dependencies.budgetPolicy ?? READONLY_MVP_BUDGET_POLICY;
-  const toolCatalogHash = digest(canonicalJson(registry.listForModel()));
+  const toolCatalogHash = registry.createManifest(clock.utcNow()).catalogHash;
   const configVersion = `config:${digest(canonicalJson({
     model: dependencies.modelAdapter.model,
     budgetPolicy,

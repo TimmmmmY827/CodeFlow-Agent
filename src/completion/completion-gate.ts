@@ -60,6 +60,11 @@ export interface CompletionDecision {
   readonly reasons: readonly string[];
 }
 
+export const completionDecisionSchema = z.object({
+  outcome: z.enum(["verified", "rejected"]),
+  reasons: z.array(z.string()),
+}).strict();
+
 export class CompletionGate {
   evaluate(claimInput: unknown, snapshot: CompletionSnapshot): CompletionDecision {
     const parsed = completionClaimSchema.safeParse(claimInput);
