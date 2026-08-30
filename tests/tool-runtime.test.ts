@@ -494,6 +494,39 @@ describe("ToolRuntime", () => {
       error: { category: "side_effect_unknown", retryable: false },
     });
   });
+
+  it("preserves a structured provider's unknown workspace-write outcome", async () => {
+    const registry = new ToolRegistry();
+    registerTool(registry, {
+      name: "run_command",
+      description: "Run an authorized command",
+      risk: "task_authorized",
+      sideEffect: "workspace_write",
+      retryPolicy: "never",
+      inputSchema: z.object({ command: z.string() }),
+      execute: async () => {
+        throw new ToolExecutionError({
+          category: "command_timeout",
+          message: "The command did not terminate before its deadline.",
+          retryable: false,
+          sideEffectStatus: "unknown",
+          recovery: null,
+        });
+      },
+    });
+    const runtime = new ToolRuntime(registry, new PermissionEngine(), { journal: journalStub() });
+
+    const result = await runtime.execute({
+      ...request("run_command", { command: "test" }),
+      traceId: randomUUID(),
+    });
+
+    expect(result).toMatchObject({
+      status: "unknown",
+      sideEffectStatus: "unknown",
+      error: { category: "command_timeout", retryable: false },
+    });
+  });
 });
 
 function request(toolName: string, input: unknown): ToolExecutionRequest {
