@@ -213,7 +213,9 @@ function request(
     signal,
     sessionId: randomUUID(),
     taskId: randomUUID(),
-    taskWriteAuthorized: false,
+    workspaceId: randomUUID(),
+    authorizationVersion: "authorization:test-v1",
+    taskAuthorization: null,
     approvalToken: null,
   };
 }

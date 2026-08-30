@@ -6,9 +6,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createAgentEvent, createEventContext } from "../src/events/agent-event.js";
 import { reduceAgentEvents } from "../src/events/state-reducer.js";
 import { budgetDeltaSchema, type BudgetPolicy } from "../src/policy/budget-contracts.js";
+import { OPERATION_BINDING_VERSION, type OperationBinding } from "../src/policy/permission-contracts.js";
+import { createOperationHash } from "../src/policy/operation-hash.js";
 import type { Clock } from "../src/shared/contracts.js";
 import { STORAGE_RECORD_SCHEMA_VERSION, type CreateSessionBundle } from "../src/storage/contracts.js";
 import { SqliteBudgetLedger } from "../src/storage/sqlite/sqlite-budget-ledger.js";
+import { SqliteApprovalRepository } from "../src/storage/sqlite/sqlite-approval-repository.js";
 import { SqliteStorageDatabase } from "../src/storage/sqlite/sqlite-database.js";
 import { SqliteEventStore } from "../src/storage/sqlite/sqlite-event-store.js";
 import { SqliteExecutionJournal } from "../src/storage/sqlite/sqlite-execution-journal.js";
@@ -79,7 +82,12 @@ describe("SqliteExecutionJournal", () => {
     const events = new SqliteEventStore(storage, { faultInjector: { hit: () => { throw new Error("disk interrupted"); } } });
     const ledger = new SqliteBudgetLedger(storage);
     await ledger.initialize({ sessionId: bundle.session.sessionId, policy, pricingVersion: "pricing:test" });
-    const journal = new SqliteExecutionJournal(storage, events, ledger);
+    const approvals = new SqliteApprovalRepository(storage);
+    const binding = approvalBinding(bundle);
+    const operationHash = createOperationHash(binding);
+    const approvalId = randomUUID();
+    await issueApproved(approvals, binding, approvalId);
+    const journal = new SqliteExecutionJournal(storage, events, ledger, approvals);
 
     await expect(journal.begin({
       identity: {
@@ -92,12 +100,59 @@ describe("SqliteExecutionJournal", () => {
         configVersion: bundle.session.configVersion,
       },
       kind: "tool",
-      name: "read_file",
-      operationHash: `sha256:${"2".repeat(64)}`,
+      name: binding.toolName,
+      operationHash,
       estimate: budgetDeltaSchema.parse({ toolCalls: 1 }),
+      authorization: { risk: "single_confirmation", authorizationId: null, approvalId },
+      approvalToConsume: { approvalId, operationHash },
     })).rejects.toThrow("disk interrupted");
+    await expect(approvals.get(approvalId)).resolves.toMatchObject({ state: "approved" });
     await expect(ledger.listEntries(bundle.session.sessionId)).resolves.toEqual([]);
     await expect(events.list(bundle.session.sessionId)).resolves.toHaveLength(1);
+  });
+
+  it("consumes approval, reserves budget, and records authorization in one durable start", async () => {
+    const storage = createStorage();
+    const bundle = createBundle();
+    await sessionRepository(storage).create(bundle);
+    const events = new SqliteEventStore(storage);
+    const ledger = new SqliteBudgetLedger(storage);
+    await ledger.initialize({ sessionId: bundle.session.sessionId, policy, pricingVersion: "pricing:test" });
+    const approvals = new SqliteApprovalRepository(storage);
+    const binding = approvalBinding(bundle);
+    const operationHash = createOperationHash(binding);
+    const approvalId = randomUUID();
+    await issueApproved(approvals, binding, approvalId);
+    const journal = new SqliteExecutionJournal(storage, events, ledger, approvals);
+
+    await journal.begin({
+      identity: {
+        sessionId: bundle.session.sessionId,
+        taskId: bundle.rootTask.taskId,
+        traceId: bundle.createdEvent.traceId,
+        workspacePath: bundle.session.workspace.root.normalizedPath,
+        codeVersion: binding.codeVersion,
+        diffHash: binding.diffHash,
+        configVersion: binding.configVersion,
+      },
+      kind: "tool",
+      name: binding.toolName,
+      operationHash,
+      estimate: budgetDeltaSchema.parse({ toolCalls: 1 }),
+      authorization: { risk: "single_confirmation", authorizationId: null, approvalId },
+      approvalToConsume: { approvalId, operationHash },
+    });
+
+    await expect(approvals.get(approvalId)).resolves.toMatchObject({ state: "consumed" });
+    await expect(ledger.listEntries(bundle.session.sessionId)).resolves.toHaveLength(1);
+    const facts = await events.list(bundle.session.sessionId);
+    expect(facts.at(-1)).toMatchObject({
+      type: "tool.started",
+      context: {
+        authorization: { risk: "single_confirmation", authorizationId: null, approvalId },
+        operation: { operationHash },
+      },
+    });
   });
 });
 
@@ -148,4 +203,45 @@ function createBundle(): CreateSessionBundle {
     rootTask: { schemaVersion: STORAGE_RECORD_SCHEMA_VERSION, taskId, actorId: "agent:primary", title: goal, createdAt: NOW },
     createdEvent,
   };
+}
+
+function approvalBinding(bundle: CreateSessionBundle): OperationBinding {
+  return {
+    bindingVersion: OPERATION_BINDING_VERSION,
+    sessionId: bundle.session.sessionId,
+    taskId: bundle.rootTask.taskId,
+    authorizationVersion: "authorization:test-v1",
+    toolName: "publish_changes",
+    toolVersion: "tool:publish_changes@test",
+    inputSchemaHash: `sha256:${"1".repeat(64)}`,
+    normalizationVersion: "normalization:test-v1",
+    effectiveInputHash: `sha256:${"2".repeat(64)}`,
+    workspaceId: bundle.session.workspace.workspaceId,
+    codeVersion: "git:test",
+    diffHash: `sha256:${"d".repeat(64)}`,
+    configVersion: bundle.session.configVersion,
+  };
+}
+
+async function issueApproved(
+  approvals: SqliteApprovalRepository,
+  binding: OperationBinding,
+  approvalId: string,
+): Promise<void> {
+  const expiresAt = "2999-01-01T00:00:00.000Z" as const;
+  await approvals.issue({
+    approvalId,
+    binding,
+    expiresAt,
+    summary: {
+      schemaVersion: 1,
+      toolName: binding.toolName,
+      toolVersion: binding.toolVersion,
+      resources: [{ kind: "remote", value: "origin" }],
+      codeVersion: binding.codeVersion,
+      diffHash: binding.diffHash,
+      expiresAt,
+    },
+  });
+  await approvals.resolve({ approvalId, decision: "approved", reason: "Approved for test." });
 }

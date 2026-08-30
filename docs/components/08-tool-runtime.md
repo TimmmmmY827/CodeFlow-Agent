@@ -1,6 +1,6 @@
 # C08 ToolRuntime
 
-- 状态：输入校验与规范化、资源声明、权限、legacy hash、输出 schema、执行、JSON 边界和 Artifact 外置基础已实现；完整 OperationBinding、资源锁、timeout、预算事务和故障恢复缺失
+- 状态：输入规范化、完整 OperationBinding、C03 权限判断、批准消费 + 预算预留 + `tool.started` 原子提交、输出 schema、JSON/Artifact 边界和 journal 结算已实现；资源锁、per-tool timeout、独立 operation 恢复/对账仍延期
 - 目标阶段：D3–D4
 - 代码位置：`src/tools/tool-runtime.ts`
 - 硬依赖：[C00](00-shared-contracts.md)、[C01](01-event-state.md)、[C02](02-storage-artifacts.md)、[C03](03-permission-engine.md)、[C04](04-budget-controller.md)、[C07](07-tool-registry.md)
@@ -31,13 +31,15 @@
 
 ```text
 lookup/availability -> validate input -> normalize + validate resource claims
- -> legacy operation hash over effective input -> cancellation check
- -> legacy permission adapter -> check/consume in-memory approval -> emit started
+ -> versioned OperationBinding/hash -> cancellation check
+ -> PermissionEngine.evaluate with task authorization or durable approval evidence
+ -> journal.begin: consume approval + reserve budget + append started in one transaction
+ -> require durable acknowledgement
  -> execute -> validate output schema -> JSON serialization boundary -> inline or ArtifactStore
- -> emit finished -> return envelope
+ -> journal.finish: settle budget + append terminal fact -> return envelope
 ```
 
-当前 Runtime 已从 C07 同一注册事实取得 tool version、input/output schema hash、normalization version、transformation ledger 和 resource claims；Zod 默认值/trim 等 schema 变换会以根级 hash ledger 记录，工具规范化继续记录字段级 hash ledger。durable journal begin payload 会记录完整 tool contract、requested/effective input hash、变换和资源声明，执行只使用再次通过 input schema 的 effective input，输出必须通过 output schema 后才可进入 JSON/Artifact 边界。Runtime 尚未接完整 OperationBinding、资源锁、budget reservation、per-tool timeout 或恢复对账；observer/ArtifactStore 失败后的证据恢复也未完成。C03 已提供完整 OperationBinding、持久审批 repository 和 SQLite 消费原语，C04 已提供 `SqliteBudgetLedger.reserveWithinTransaction/commitWithinTransaction` 等同步事务原语，但当前 Runtime 尚未组装，仍使用显式 legacy hash/permission 入口与进程内消费；该入口不得被新调用方采用。
+当前 Runtime 从 C07 同一注册事实取得 tool version、input/output schema hash、normalization version、transformation ledger 和 resource claims；Zod 默认值/trim 等 schema 变换会以根级 hash ledger 记录，工具规范化继续记录字段级 hash ledger。Runtime 使用最终 effective input 与 Session/Task/workspace/code/diff/config/authorization/tool contract 构造 C03 `OperationBinding`，不再调用 legacy hash/permission 入口。单操作批准必须从持久 repository 读取，随后由 SQLite execution journal 在同一 `BEGIN IMMEDIATE` 中消费批准、预留 C04 预算并追加带 authorization 引用的 `tool.started`；任一步失败都会回滚，且写工具在 durable acknowledgement 前不会进入 `execute`。finish 在同一事务中结算预算并追加相同 span/operation hash/authorization 的 terminal fact。资源锁、per-tool timeout、独立 operation 状态表及恢复对账仍未完成；observer/ArtifactStore 失败后的证据恢复也保持显式延期。
 
 ### 3.2 目标流水线（规划中）
 

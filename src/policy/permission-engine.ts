@@ -2,7 +2,6 @@ import {
   systemClock,
   toolRiskSchema,
   toolSideEffectSchema,
-  utcTimestampSchema,
   type Clock,
   type StableId,
   type ToolRisk,
@@ -63,21 +62,6 @@ interface PermissionDecisionValue<TOutcome extends "allow" | "confirm" | "deny">
   readonly approvalId: StableId | null;
 }
 
-/** Pre-C03 adapter retained only until C08 supplies full operation bindings. */
-export interface LegacyApprovalToken {
-  readonly approvalId: string;
-  readonly toolName: string;
-  readonly operationHash: string;
-  readonly expiresAt: string;
-}
-
-/** Pre-C03 adapter retained only until C08 supplies durable approval records. */
-export interface LegacyPermissionContext {
-  readonly taskWriteAuthorized: boolean;
-  readonly operationHash: string | null;
-  readonly approvalToken: LegacyApprovalToken | null;
-}
-
 export class PermissionEngine {
   constructor(private readonly clock: Clock = systemClock) {}
 
@@ -95,39 +79,6 @@ export class PermissionEngine {
       case "single_confirmation":
         return this.#checkApproval(tool.name, context);
     }
-  }
-
-  /**
-   * Compatibility entry point for the current C08 runtime. New code must call
-   * evaluate() with a complete OperationBinding and durable approval record.
-   */
-  decide(tool: PermissionSubject, context: LegacyPermissionContext): PermissionDecision {
-    if (!validToolPolicy(tool)) {
-      return deny("policy_metadata_invalid", "The tool risk class is not registered.");
-    }
-    if (tool.risk === "automatic" || tool.risk === "control") {
-      return allow("fixed_policy", "Tool is permitted by its fixed risk class.");
-    }
-    if (tool.risk === "task_authorized") {
-      return context.taskWriteAuthorized
-        ? allow("fixed_policy", "The current task includes workspace write authorization.")
-        : confirm("task_authorization_required", "Workspace write authorization is required.");
-    }
-
-    const token = context.approvalToken;
-    if (!token || !context.operationHash) {
-      return confirm("approval_required", "This operation needs a single-use confirmation.");
-    }
-    if (!token.approvalId.trim() || !utcTimestampSchema.safeParse(token.expiresAt).success) {
-      return deny("approval_invalid", "The approval token is invalid.");
-    }
-    if (token.toolName !== tool.name || token.operationHash !== context.operationHash) {
-      return deny("approval_invalid", "The approval is bound to different operation parameters.");
-    }
-    if (isExpired(token.expiresAt as UtcTimestamp, this.clock.utcNow())) {
-      return confirm("approval_expired", "The approval has expired.");
-    }
-    return allow("approval_valid", "A matching, unexpired approval is present.");
   }
 
   #checkTaskAuthorization(toolName: string, context: PermissionContext): PermissionDecision {

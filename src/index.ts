@@ -207,8 +207,6 @@ export type {
 } from "./policy/budget-contracts.js";
 export { PermissionEngine } from "./policy/permission-engine.js";
 export type {
-  LegacyApprovalToken,
-  LegacyPermissionContext,
   PermissionContext,
   PermissionDecision,
   PermissionReasonCode,
@@ -244,7 +242,6 @@ export type {
 export { createApprovalSummary } from "./policy/approval-summary.js";
 export {
   createEffectiveInputHash,
-  createLegacyOperationHash,
   createOperationHash,
 } from "./policy/operation-hash.js";
 export {

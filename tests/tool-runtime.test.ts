@@ -6,7 +6,12 @@ import { describe, expect, it } from "vitest";
 import type { AgentEvent } from "../src/events/agent-event.js";
 import type { ExecutionJournal, FinishExecutionInput } from "../src/events/execution-journal.js";
 import { PermissionEngine } from "../src/policy/permission-engine.js";
-import { createLegacyOperationHash } from "../src/policy/operation-hash.js";
+import {
+  OPERATION_BINDING_VERSION,
+  type ApprovalRecord,
+  type OperationBinding,
+} from "../src/policy/permission-contracts.js";
+import { createOperationHash } from "../src/policy/operation-hash.js";
 import { canonicalJson } from "../src/shared/json.js";
 import type { ArtifactWriter } from "../src/storage/storage.js";
 import { ToolRegistry } from "../src/tools/tool-registry.js";
@@ -38,14 +43,15 @@ describe("ToolRuntime", () => {
     });
     const runtime = new ToolRuntime(registry, new PermissionEngine());
 
-    const result = await runtime.execute(request("read_file", { path: " README.md " }));
+    const executionRequest = request("read_file", { path: " README.md " });
+    const result = await runtime.execute(executionRequest);
 
     expect(executedPath).toBe("README.md");
-    expect(result.operationHash).toBe(createLegacyOperationHash({
-      toolName: "read_file",
-      input: { path: "README.md" },
-      codeVersion: "git:abc123",
-    }));
+    expect(result.operationHash).toBe(createOperationHash(bindingFor(
+      registry,
+      executionRequest,
+      { path: "README.md" },
+    )));
   });
 
   it("rejects forged, duplicate, missing, and incomplete transformation evidence", async () => {
@@ -153,10 +159,11 @@ describe("ToolRuntime", () => {
           reservationId: randomUUID(),
           spanId: randomUUID(),
           identity: input.identity,
-          kind: input.kind,
-          name: input.name,
-          operationHash: input.operationHash,
-          startedAt: "2026-08-15T00:00:00.000Z",
+        kind: input.kind,
+        name: input.name,
+        operationHash: input.operationHash,
+        authorization: input.authorization ?? null,
+        startedAt: "2026-08-15T00:00:00.000Z",
         };
       },
       finish: async (input) => {
@@ -291,7 +298,7 @@ describe("ToolRuntime", () => {
     })).toThrow("input schema");
   });
 
-  it("binds a confirmation to canonical input and code version", async () => {
+  it("binds, durably consumes, and rejects replay of a confirmation", async () => {
     const registry = new ToolRegistry();
     registerTool(registry, {
       name: "commit_push_create_pr",
@@ -302,19 +309,23 @@ describe("ToolRuntime", () => {
       inputSchema: z.object({ branch: z.string(), remote: z.string() }),
       execute: async () => ({ published: true }),
     });
-    const runtime = new ToolRuntime(registry, new PermissionEngine());
     const input = { remote: "origin", branch: "agent/demo" };
-    const operationHash = createLegacyOperationHash({
-      toolName: "commit_push_create_pr",
-      input,
-      codeVersion: "git:abc123",
+    const executionRequest = request("commit_push_create_pr", input);
+    const binding = bindingFor(registry, executionRequest, input);
+    const operationHash = createOperationHash(binding);
+    const approvalId = randomUUID();
+    let approval = approvalFor(binding, approvalId, "approved");
+    const journal = journalStub(() => { approval = approvalFor(binding, approvalId, "consumed"); });
+    const runtime = new ToolRuntime(registry, new PermissionEngine(), {
+      journal,
+      approvalRepository: { get: async () => approval },
     });
 
     const result = await runtime.execute({
-      ...request("commit_push_create_pr", input),
+      ...executionRequest,
+      traceId: randomUUID(),
       approvalToken: {
-        approvalId: "approval-1",
-        toolName: "commit_push_create_pr",
+        approvalId,
         operationHash,
         expiresAt: "2999-01-01T00:00:00.000Z",
       },
@@ -324,18 +335,83 @@ describe("ToolRuntime", () => {
     expect(result.operationHash).toBe(operationHash);
 
     const replay = await runtime.execute({
-      ...request("commit_push_create_pr", input),
+      ...executionRequest,
+      traceId: randomUUID(),
       approvalToken: {
-        approvalId: "approval-1",
-        toolName: "commit_push_create_pr",
+        approvalId,
         operationHash,
         expiresAt: "2999-01-01T00:00:00.000Z",
       },
     });
     expect(replay).toMatchObject({
       status: "denied",
-      error: { category: "approval_already_consumed" },
+      error: { category: "approval_consumed" },
     });
+  });
+
+  it("does not execute a write tool before durable begin acknowledges", async () => {
+    const registry = new ToolRegistry();
+    let executions = 0;
+    registerTool(registry, {
+      name: "write_file",
+      description: "Write an authorized file",
+      risk: "task_authorized",
+      sideEffect: "workspace_write",
+      retryPolicy: "never",
+      inputSchema: z.object({ path: z.string() }),
+      execute: async () => { executions += 1; return { written: true }; },
+    });
+    const executionRequest = request("write_file", { path: "README.md" });
+
+    await expect(new ToolRuntime(registry, new PermissionEngine()).execute(executionRequest))
+      .resolves.toMatchObject({
+        status: "failed",
+        sideEffectStatus: "not_started",
+        error: { category: "durable_journal_required" },
+      });
+
+    const runtime = new ToolRuntime(registry, new PermissionEngine(), {
+      journal: {
+        ...journalStub(),
+        begin: async () => { throw new Error("durable commit failed"); },
+      },
+    });
+    await expect(runtime.execute({ ...executionRequest, traceId: randomUUID() })).resolves.toMatchObject({
+      status: "failed",
+      sideEffectStatus: "not_started",
+      error: { category: "tool_journal_begin_failed" },
+    });
+    expect(executions).toBe(0);
+  });
+
+  it("denies task authorization bound to another workspace", async () => {
+    const registry = new ToolRegistry();
+    let executions = 0;
+    registerTool(registry, {
+      name: "apply_patch",
+      description: "Apply a task-authorized patch",
+      risk: "task_authorized",
+      sideEffect: "workspace_write",
+      retryPolicy: "never",
+      inputSchema: z.object({ patch: z.string() }),
+      execute: async () => { executions += 1; return { applied: true }; },
+    });
+    const executionRequest = request("apply_patch", { patch: "safe" });
+    const mismatchedAuthorization = {
+      ...executionRequest.taskAuthorization!,
+      workspaceId: randomUUID(),
+    };
+
+    await expect(new ToolRuntime(registry, new PermissionEngine(), { journal: journalStub() }).execute({
+      ...executionRequest,
+      traceId: randomUUID(),
+      taskAuthorization: mismatchedAuthorization,
+    })).resolves.toMatchObject({
+      status: "denied",
+      sideEffectStatus: "not_started",
+      error: { category: "task_authorization_invalid" },
+    });
+    expect(executions).toBe(0);
   });
 
   it("externalizes long output through ArtifactStore", async () => {
@@ -362,9 +438,13 @@ describe("ToolRuntime", () => {
     const runtime = new ToolRuntime(registry, new PermissionEngine(), {
       artifactStore,
       maxInlineBytes: 16,
+      journal: journalStub(),
     });
 
-    const result = await runtime.execute(request("run_command", { command: "test" }));
+    const result = await runtime.execute({
+      ...request("run_command", { command: "test" }),
+      traceId: randomUUID(),
+    });
 
     expect(result).toMatchObject({
       status: "completed",
@@ -387,19 +467,22 @@ describe("ToolRuntime", () => {
         throw new Error("connection dropped after push");
       },
     });
-    const runtime = new ToolRuntime(registry, new PermissionEngine());
     const input = { branch: "agent/demo" };
-    const operationHash = createLegacyOperationHash({
-      toolName: "commit_push_create_pr",
-      input,
-      codeVersion: "git:abc123",
+    const executionRequest = request("commit_push_create_pr", input);
+    const binding = bindingFor(registry, executionRequest, input);
+    const operationHash = createOperationHash(binding);
+    const approvalId = randomUUID();
+    const approval = approvalFor(binding, approvalId, "approved");
+    const runtime = new ToolRuntime(registry, new PermissionEngine(), {
+      journal: journalStub(),
+      approvalRepository: { get: async () => approval },
     });
 
     const result = await runtime.execute({
-      ...request("commit_push_create_pr", input),
+      ...executionRequest,
+      traceId: randomUUID(),
       approvalToken: {
-        approvalId: "approval-external",
-        toolName: "commit_push_create_pr",
+        approvalId,
         operationHash,
         expiresAt: "2999-01-01T00:00:00.000Z",
       },
@@ -414,6 +497,9 @@ describe("ToolRuntime", () => {
 });
 
 function request(toolName: string, input: unknown): ToolExecutionRequest {
+  const sessionId = randomUUID();
+  const taskId = randomUUID();
+  const workspaceId = randomUUID();
   return {
     toolName,
     input,
@@ -421,10 +507,97 @@ function request(toolName: string, input: unknown): ToolExecutionRequest {
     codeVersion: "git:abc123",
     configVersion: "config:v1",
     signal: new AbortController().signal,
-    sessionId: randomUUID(),
-    taskId: randomUUID(),
-    taskWriteAuthorized: true,
+    sessionId,
+    taskId,
+    workspaceId,
+    authorizationVersion: "authorization:test-v1",
+    taskAuthorization: {
+      schemaVersion: 1,
+      authorizationId: randomUUID(),
+      authorizationVersion: "authorization:test-v1",
+      sessionId,
+      taskId,
+      workspaceId,
+      state: "active",
+      grantedAt: "2026-08-15T00:00:00.000Z",
+      expiresAt: null,
+    },
     approvalToken: null,
+  };
+}
+
+function bindingFor(
+  registry: ToolRegistry,
+  executionRequest: ToolExecutionRequest,
+  effectiveInput: unknown,
+): OperationBinding {
+  const tool = registry.get(executionRequest.toolName);
+  if (!tool) throw new Error(`Missing test tool ${executionRequest.toolName}.`);
+  return {
+    bindingVersion: OPERATION_BINDING_VERSION,
+    sessionId: executionRequest.sessionId,
+    taskId: executionRequest.taskId,
+    authorizationVersion: executionRequest.authorizationVersion,
+    toolName: tool.name,
+    toolVersion: tool.contract.version,
+    inputSchemaHash: tool.contract.inputSchemaHash,
+    normalizationVersion: tool.contract.normalizationVersion,
+    effectiveInputHash: digest(effectiveInput),
+    workspaceId: executionRequest.workspaceId,
+    codeVersion: executionRequest.codeVersion,
+    diffHash: executionRequest.diffHash ?? null,
+    configVersion: executionRequest.configVersion,
+  };
+}
+
+function approvalFor(
+  binding: OperationBinding,
+  approvalId: string,
+  state: "approved" | "consumed",
+): ApprovalRecord {
+  const issuedAt = "2026-08-15T00:00:00.000Z";
+  const expiresAt = "2999-01-01T00:00:00.000Z";
+  return {
+    schemaVersion: 1,
+    approvalId,
+    binding,
+    operationHash: createOperationHash(binding),
+    summary: {
+      schemaVersion: 1,
+      toolName: binding.toolName,
+      toolVersion: binding.toolVersion,
+      resources: [],
+      codeVersion: binding.codeVersion,
+      diffHash: binding.diffHash,
+      expiresAt,
+    },
+    state,
+    issuedAt,
+    expiresAt,
+    resolvedAt: issuedAt,
+    consumedAt: state === "consumed" ? issuedAt : null,
+    decisionReason: "User approved the operation.",
+  };
+}
+
+function journalStub(onBegin: (() => void) | null = null): ExecutionJournal {
+  return {
+    append: async () => ({} as AgentEvent),
+    begin: async (input) => {
+      onBegin?.();
+      return {
+        operationId: randomUUID(),
+        reservationId: randomUUID(),
+        spanId: randomUUID(),
+        identity: input.identity,
+        kind: input.kind,
+        name: input.name,
+        operationHash: input.operationHash,
+        authorization: input.authorization ?? null,
+        startedAt: "2026-08-15T00:00:00.000Z",
+      };
+    },
+    finish: async () => ({} as AgentEvent),
   };
 }
 
