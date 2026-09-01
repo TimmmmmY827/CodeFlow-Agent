@@ -12,6 +12,7 @@ import {
 } from "node:fs/promises";
 import {
   basename,
+  delimiter,
   dirname,
   isAbsolute,
   relative,
@@ -154,9 +155,11 @@ export function createApplyPatchTool(): ToolDefinition<ApplyPatchInput, ApplyPat
     (input) => workspaceWriteClaims(input.expectedFiles.map((file) => file.path)),
     async (input, context) => {
       const root = await requireWorkspaceRoot(context.workspace);
-      const patchPaths = parsePatchPaths(input.patch);
+      const patchTargets = parsePatchTargets(input.patch);
+      const patchPaths = patchTargets.map((target) => target.path);
       const expected = new Map(input.expectedFiles.map((file) => [file.path, file.sha256]));
       assertExactPathSet(patchPaths, expected);
+      assertPatchTargetVersions(patchTargets, expected);
       const codeVersion = await currentCodeVersion(root, context);
       if (input.expectedCodeVersion !== context.codeVersion || input.expectedCodeVersion !== codeVersion) {
         throw toolError(
@@ -167,26 +170,33 @@ export function createApplyPatchTool(): ToolDefinition<ApplyPatchInput, ApplyPat
         );
       }
       const before = await readExpectedVersions(root, expected);
+      const statusBefore = await currentGitStatusPaths(root, context, "not_started");
       await runGitApply(root, context, input.patch, true);
       await assertExpectedVersions(root, expected);
       await runGitApply(root, context, input.patch, false);
 
-      const changedFiles = [];
-      for (const path of patchPaths) {
-        const target = await resolveWriteTarget(root, path, true);
-        const afterSha256 = digestBytes(await readFile(target.candidate));
-        changedFiles.push({
-          path,
-          kind: before.get(path) === null ? "created" as const : "modified" as const,
-          beforeSha256: before.get(path) ?? null,
-          afterSha256,
-        });
+      try {
+        const statusAfter = await currentGitStatusPaths(root, context, "unknown");
+        assertNoUnexpectedStatusPaths(statusBefore, statusAfter, new Set(patchPaths));
+        const changedFiles = [];
+        for (const path of patchPaths) {
+          const target = await resolveWriteTarget(root, path, true);
+          const afterSha256 = digestBytes(await readFile(target.candidate));
+          changedFiles.push({
+            path,
+            kind: before.get(path) === null ? "created" as const : "modified" as const,
+            beforeSha256: before.get(path) ?? null,
+            afterSha256,
+          });
+        }
+        return {
+          changedFiles,
+          newCodeVersion: await currentCodeVersion(root, context),
+          diffHash: await currentDiffHash(root, context),
+        };
+      } catch (error: unknown) {
+        throw unknownAfterWrite(error, "patch_verification_failed", "The applied patch could not be verified safely.");
       }
-      return {
-        changedFiles,
-        newCodeVersion: await currentCodeVersion(root, context),
-        diffHash: await currentDiffHash(root, context),
-      };
     },
   );
 }
@@ -253,12 +263,16 @@ export function createWriteFileTool(): ToolDefinition<WriteFileInput, WriteFileO
         await unlink(temporary).catch(() => undefined);
       }
 
-      const committed = await resolveWriteTarget(root, input.path, true);
-      const afterSha256 = digestBytes(await readRegularFile(committed.candidate));
-      if (afterSha256 !== digestBytes(bytes)) {
-        throw toolError("file_commit_unverified", "The committed file does not match the requested bytes.", false, "unknown");
+      try {
+        const committed = await resolveWriteTarget(root, input.path, true);
+        const afterSha256 = digestBytes(await readRegularFile(committed.candidate));
+        if (afterSha256 !== digestBytes(bytes)) {
+          throw toolError("file_commit_unverified", "The committed file does not match the requested bytes.", false, "unknown");
+        }
+        return { path: input.path, beforeSha256, afterSha256 };
+      } catch (error: unknown) {
+        throw unknownAfterWrite(error, "file_commit_unverified", "The committed file could not be verified safely.");
       }
-      return { path: input.path, beforeSha256, afterSha256 };
     },
   );
 }
@@ -266,7 +280,7 @@ export function createWriteFileTool(): ToolDefinition<WriteFileInput, WriteFileO
 export function createRunCommandTool(): ToolDefinition<RunCommandInput, RunCommandOutput> {
   return writeTool(
     "run_command",
-    "Run one allowlisted executable without a shell in a bounded workspace directory.",
+    "Run one allowlisted executable in a bounded workspace directory; Windows package shims use a hardened cmd bridge.",
     runCommandInputSchema,
     runCommandOutputSchema,
     normalizeCommandInput,
@@ -278,14 +292,15 @@ export function createRunCommandTool(): ToolDefinition<RunCommandInput, RunComma
       const environment = commandEnvironment(input.env);
       const startedAt = performance.now();
       const result = await runProcess({
-        command,
-        args: input.args,
+        command: command.executable,
+        args: command.args,
         cwd: workingDirectory.candidate,
         environment,
         context,
         timeoutMs: input.timeoutMs,
         stdin: null,
         sideEffectStatusAfterStart: "unknown",
+        windowsVerbatimArguments: command.windowsVerbatimArguments ?? false,
       });
       return {
         exitCode: result.exitCode,
@@ -413,16 +428,15 @@ async function resolveWriteTarget(
   const candidate = resolve(root, requested);
   assertContained(root, candidate);
   const normalized = normalizeRelative(root, candidate);
-  const segments = normalized.split("/").filter(Boolean);
-  if (segments.some((segment) => WRITE_DENIED_DIRECTORIES.has(caseFold(segment)))) {
-    throw toolError("path_ignored", "The target path is reserved or generated content.", false, "not_started");
-  }
+  assertAllowedWritePath(normalized);
   await assertNoLinkTraversal(root, candidate, !mustExist);
   const parentCandidate = relative(root, candidate) === "" ? root : dirname(candidate);
   const parent = await realpath(parentCandidate).catch(() => {
     throw toolError("path_parent_not_found", "The target parent directory does not exist.", false, "not_started");
   });
   assertContained(root, parent);
+  assertResolvedPathIdentity(root, parentCandidate, parent);
+  assertAllowedWritePath(normalizeRelative(root, parent));
   const parentMetadata = await lstat(parent);
   if (!parentMetadata.isDirectory() || parentMetadata.isSymbolicLink()) {
     throw toolError("workspace_link_rejected", "Write paths cannot traverse links or junctions.", false, "not_started");
@@ -432,6 +446,8 @@ async function resolveWriteTarget(
     throw toolError("path_not_found", "The requested workspace path does not exist.", false, "not_started");
   });
   assertContained(root, resolvedCandidate);
+  assertResolvedPathIdentity(root, candidate, resolvedCandidate);
+  assertAllowedWritePath(normalizeRelative(root, resolvedCandidate));
   const metadata = await lstat(candidate);
   if (metadata.isSymbolicLink()) {
     throw toolError("workspace_link_rejected", "Write paths cannot target links or junctions.", false, "not_started");
@@ -440,6 +456,26 @@ async function resolveWriteTarget(
     throw toolError(allowDirectory ? "not_a_directory" : "not_a_file", "The requested path has the wrong file type.", false, "not_started");
   }
   return { root, parent, candidate: resolvedCandidate };
+}
+
+function assertAllowedWritePath(path: string): void {
+  const segments = path.split("/").filter(Boolean);
+  if (segments.some((segment) => WRITE_DENIED_DIRECTORIES.has(caseFold(segment)))) {
+    throw toolError("path_ignored", "The target path is reserved or generated content.", false, "not_started");
+  }
+}
+
+function assertResolvedPathIdentity(root: string, requested: string, resolvedPath: string): void {
+  const requestedRelative = caseFold(normalizeRelative(root, requested));
+  const resolvedRelative = caseFold(normalizeRelative(root, resolvedPath));
+  if (requestedRelative !== resolvedRelative) {
+    throw toolError(
+      "workspace_alias_rejected",
+      "Write paths must use their canonical long names and casing; filesystem aliases are rejected.",
+      false,
+      "not_started",
+    );
+  }
 }
 
 async function assertNoLinkTraversal(root: string, candidate: string, skipTarget: boolean): Promise<void> {
@@ -472,7 +508,7 @@ function normalizeRelative(root: string, candidate: string): string {
 }
 
 function caseFold(value: string): string {
-  return process.platform === "win32" ? value.toLowerCase() : value;
+  return process.platform === "win32" || process.platform === "darwin" ? value.toLowerCase() : value;
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -493,14 +529,19 @@ async function readRegularFile(path: string): Promise<Buffer> {
   return await readFile(path);
 }
 
-function parsePatchPaths(patch: string): readonly string[] {
+interface PatchTarget {
+  readonly path: string;
+  readonly source: "existing" | "new";
+}
+
+function parsePatchTargets(patch: string): readonly PatchTarget[] {
   if (patch.includes("GIT binary patch") || /^Binary files /mu.test(patch)) {
     throw toolError("patch_binary_unsupported", "Binary patches are not supported.", false, "not_started");
   }
   if (/^(rename|copy) (from|to) /mu.test(patch)) {
     throw toolError("patch_rename_unsupported", "Patch rename and copy records are not supported.", false, "not_started");
   }
-  const paths: string[] = [];
+  const targets: PatchTarget[] = [];
   const lines = patch.replaceAll("\r\n", "\n").split("\n");
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
@@ -515,22 +556,38 @@ function parsePatchPaths(patch: string): readonly string[] {
     }
     const blockEnd = lines.findIndex((candidate, candidateIndex) => candidateIndex > index && candidate.startsWith("diff --git "));
     const block = lines.slice(index, blockEnd === -1 ? lines.length : blockEnd).join("\n");
-    if (/^\+\+\+ \/dev\/null$/mu.test(block)) {
+    const hunkOffset = block.indexOf("\n@@");
+    if (hunkOffset < 0) {
+      throw toolError("patch_header_invalid", "Each patch block requires at least one unified diff hunk.", false, "not_started");
+    }
+    const header = block.slice(0, hunkOffset);
+    const preimages = [...header.matchAll(/^--- (.+)$/gmu)].map((item) => item[1] ?? "");
+    const postimages = [...header.matchAll(/^\+\+\+ (.+)$/gmu)].map((item) => item[1] ?? "");
+    if (preimages.length !== 1 || postimages.length !== 1) {
+      throw toolError("patch_header_invalid", "Each patch block requires exactly one preimage and postimage header.", false, "not_started");
+    }
+    if (postimages[0] === "/dev/null") {
       throw toolError("patch_delete_requires_approval", "File deletion must use the separately approved delete tool.", false, "not_started");
     }
-    if (!new RegExp(`^\\+\\+\\+ b/${escapeRegExp(path)}$`, "mu").test(block)) {
+    if (postimages[0] !== `b/${path}`) {
       throw toolError("patch_header_invalid", "Each patch block requires a matching target header.", false, "not_started");
     }
-    paths.push(path);
+    const preimage = preimages[0];
+    if (preimage !== "/dev/null" && preimage !== `a/${path}`) {
+      throw toolError(
+        "patch_preimage_mismatch",
+        "A patch preimage must match its declared target; implicit rename and disclosure patches are rejected.",
+        false,
+        "not_started",
+      );
+    }
+    targets.push({ path, source: preimage === "/dev/null" ? "new" : "existing" });
   }
+  const paths = targets.map((target) => target.path);
   if (paths.length === 0 || new Set(paths).size !== paths.length) {
     throw toolError("patch_invalid", "The patch must contain unique unified diff blocks.", false, "not_started");
   }
-  return paths;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return targets;
 }
 
 function assertExactPathSet(paths: readonly string[], expected: ReadonlyMap<string, string | null>): void {
@@ -541,6 +598,82 @@ function assertExactPathSet(paths: readonly string[], expected: ReadonlyMap<stri
       false,
       "not_started",
     );
+  }
+}
+
+function assertPatchTargetVersions(
+  targets: readonly PatchTarget[],
+  expected: ReadonlyMap<string, string | null>,
+): void {
+  for (const target of targets) {
+    const expectedSha256 = expected.get(target.path);
+    if ((target.source === "new") !== (expectedSha256 === null)) {
+      throw toolError(
+        "patch_preimage_version_mismatch",
+        "New-file patch headers and expected null file versions must agree.",
+        false,
+        "not_started",
+      );
+    }
+  }
+}
+
+async function currentGitStatusPaths(
+  root: string,
+  context: ToolExecutionContext,
+  sideEffectStatus: StructuredError["sideEffectStatus"],
+): Promise<ReadonlySet<string>> {
+  const result = await runProcess({
+    command: "git",
+    args: ["--no-optional-locks", "-c", "status.relativePaths=true", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "./"],
+    cwd: root,
+    environment: gitEnvironment(),
+    context,
+    timeoutMs: 10_000,
+    stdin: null,
+    sideEffectStatusAfterStart: sideEffectStatus,
+  });
+  if (result.exitCode !== 0) {
+    throw toolError("git_snapshot_failed", "The workspace Git status could not be captured.", false, sideEffectStatus);
+  }
+  if (result.stdoutTruncated || result.stderrTruncated) {
+    throw toolError("git_snapshot_truncated", "The workspace Git status exceeded its verification limit.", false, sideEffectStatus);
+  }
+  const paths = new Set<string>();
+  const records = result.stdout.split("\0");
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index] ?? "";
+    if (!record) continue;
+    if (record.length < 4 || record[2] !== " ") {
+      throw toolError("git_snapshot_invalid", "Git returned an invalid status record.", false, sideEffectStatus);
+    }
+    const status = record.slice(0, 2);
+    const path = record.slice(3).replaceAll("\\", "/");
+    paths.add(path);
+    if (/[RC]/u.test(status)) {
+      const source = records[index + 1];
+      if (!source) throw toolError("git_snapshot_invalid", "Git returned an incomplete rename record.", false, sideEffectStatus);
+      paths.add(source.replaceAll("\\", "/"));
+      index += 1;
+    }
+  }
+  return paths;
+}
+
+function assertNoUnexpectedStatusPaths(
+  before: ReadonlySet<string>,
+  after: ReadonlySet<string>,
+  declared: ReadonlySet<string>,
+): void {
+  for (const path of after) {
+    if (!before.has(path) && !declared.has(path)) {
+      throw toolError(
+        "patch_change_set_unverified",
+        "The patch changed an undeclared Git path; its side effects require inspection.",
+        false,
+        "unknown",
+      );
+    }
   }
 }
 
@@ -666,7 +799,13 @@ function commandEnvironment(overrides: Readonly<Record<string, string>>): NodeJS
   return environment;
 }
 
-async function validateCommand(root: string, input: RunCommandInput, cwd: string): Promise<string> {
+interface ValidatedCommand {
+  readonly executable: string;
+  readonly args: readonly string[];
+  readonly windowsVerbatimArguments?: boolean;
+}
+
+async function validateCommand(root: string, input: RunCommandInput, cwd: string): Promise<ValidatedCommand> {
   if (/[\\/]/u.test(input.executable) || input.executable.startsWith(".")) {
     throw toolError("command_executable_denied", "Executable paths are not accepted.", false, "not_started");
   }
@@ -678,20 +817,20 @@ async function validateCommand(root: string, input: RunCommandInput, cwd: string
   switch (executable) {
     case "node":
       await validateNodeCommand(root, input.args, cwd);
-      return process.execPath;
+      return { executable: process.execPath, args: input.args };
     case "python":
     case "python3":
       await validatePythonCommand(root, input.args, cwd);
-      return platformExecutable(executable);
+      return { executable, args: input.args };
     case "pytest":
-      return platformExecutable("pytest");
+      return { executable: "pytest", args: input.args };
     case "pnpm":
     case "npm":
       validatePackageScriptCommand(executable, input.args);
-      return platformExecutable(executable);
+      return await packageManagerCommand(executable, input.args);
     case "go":
       validateGoCommand(input.args);
-      return platformExecutable("go");
+      return { executable: "go", args: input.args };
     default:
       throw toolError("command_executable_denied", `${input.executable} is not in the run_command allowlist.`, false, "not_started");
   }
@@ -753,11 +892,55 @@ function validateGoCommand(args: readonly string[]): void {
   }
 }
 
-function platformExecutable(executable: string): string {
-  if (process.platform !== "win32") return executable;
-  return executable === "pnpm" || executable === "npm"
-    ? `${executable}.cmd`
-    : executable;
+async function packageManagerCommand(executable: string, args: readonly string[]): Promise<ValidatedCommand> {
+  if (process.platform !== "win32") return { executable, args };
+  assertWindowsBatchArguments(args);
+  const shim = await resolveWindowsBatchShim(executable);
+  const systemRoot = process.env.SYSTEMROOT ?? process.env.SystemRoot;
+  if (!systemRoot) {
+    throw toolError("command_unavailable", "The trusted Windows command processor path is unavailable.", false, "not_started");
+  }
+  const commandProcessor = await realpath(resolve(systemRoot, "System32", "cmd.exe")).catch(() => {
+    throw toolError("command_unavailable", "The trusted Windows command processor is unavailable.", false, "not_started");
+  });
+  const commandLine = `call ${[shim, ...args].map(quoteWindowsBatchArgument).join(" ")}`;
+  return {
+    executable: commandProcessor,
+    args: ["/d", "/s", "/c", commandLine],
+    windowsVerbatimArguments: true,
+  };
+}
+
+function assertWindowsBatchArguments(args: readonly string[]): void {
+  for (const argument of args) {
+    if (/[&|<>^%!()"\r\n]/u.test(argument)) {
+      throw toolError(
+        "command_argument_denied",
+        "Windows package-script arguments cannot contain command-processor metacharacters.",
+        false,
+        "not_started",
+      );
+    }
+  }
+}
+
+async function resolveWindowsBatchShim(executable: string): Promise<string> {
+  const searchPath = process.env.PATH ?? process.env.Path;
+  if (!searchPath) throw toolError("command_unavailable", `${executable} is unavailable.`, false, "not_started");
+  for (const entry of searchPath.split(delimiter)) {
+    const directory = entry.trim().replace(/^"|"$/gu, "");
+    if (!directory || !isAbsolute(directory)) continue;
+    const candidate = resolve(directory, `${executable}.cmd`);
+    const resolvedCandidate = await realpath(candidate).catch(() => null);
+    if (!resolvedCandidate) continue;
+    const metadata = await lstat(resolvedCandidate).catch(() => null);
+    if (metadata?.isFile()) return resolvedCandidate;
+  }
+  throw toolError("command_unavailable", `${executable} is unavailable.`, false, "not_started");
+}
+
+function quoteWindowsBatchArgument(argument: string): string {
+  return `"${argument}"`;
 }
 
 interface RunProcessInput {
@@ -769,6 +952,7 @@ interface RunProcessInput {
   readonly timeoutMs: number;
   readonly stdin: string | null;
   readonly sideEffectStatusAfterStart: StructuredError["sideEffectStatus"];
+  readonly windowsVerbatimArguments?: boolean;
 }
 
 interface ProcessResult {
@@ -789,6 +973,7 @@ async function runProcess(input: RunProcessInput): Promise<ProcessResult> {
         env: input.environment,
         detached: process.platform !== "win32",
         windowsHide: true,
+        windowsVerbatimArguments: input.windowsVerbatimArguments ?? false,
         shell: false,
         stdio: "pipe",
       });
@@ -817,6 +1002,7 @@ async function runProcess(input: RunProcessInput): Promise<ProcessResult> {
     input.context.signal.addEventListener("abort", onAbort, { once: true });
     child.stdout.on("data", (chunk: Buffer) => stdout.add(chunk));
     child.stderr.on("data", (chunk: Buffer) => stderr.add(chunk));
+    child.stdin.on("error", () => undefined);
     child.on("error", (error) => finish(() => rejectPromise(toolError("command_unavailable", error.message, false, "not_started"))));
     child.on("close", (code) => finish(() => {
       if (timedOut) {
@@ -854,6 +1040,7 @@ async function terminateProcessTree(child: ChildProcessWithoutNullStreams): Prom
     await new Promise<void>((resolvePromise) => {
       let settled = false;
       const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+        env: baseEnvironment(),
         windowsHide: true,
         shell: false,
         stdio: "ignore",
@@ -932,4 +1119,11 @@ function toolError(
   sideEffectStatus: StructuredError["sideEffectStatus"] = "not_started",
 ): ToolExecutionError {
   return new ToolExecutionError({ category, message, retryable, sideEffectStatus, recovery: null });
+}
+
+function unknownAfterWrite(error: unknown, category: string, message: string): ToolExecutionError {
+  if (error instanceof ToolExecutionError) {
+    return toolError(error.details.category, error.details.message, false, "unknown");
+  }
+  return toolError(category, message, false, "unknown");
 }

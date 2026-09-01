@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -112,6 +112,30 @@ describe("workspace write tools", () => {
     expect(linked).toMatchObject({ status: "failed", error: { category: "workspace_link_rejected" } });
   });
 
+  it("rejects Windows 8.3 aliases before they can enter reserved directories", async () => {
+    if (process.platform !== "win32") return;
+    await mkdir(join(workspace, ".codeflow"));
+    const reservedDirectories = [".git", ".codeflow"];
+    const aliases = reservedDirectories.map((directory) => ({
+      directory,
+      alias: windowsShortRelativePath(workspace, join(workspace, directory)),
+    })).filter((entry) => entry.alias && entry.alias.toLowerCase() !== entry.directory);
+    if (aliases.length === 0) return;
+
+    for (const { directory, alias } of aliases) {
+      const result = await runtime.execute(await request(workspace, "write_file", {
+        path: `${alias}/codeflow-short-name-bypass.txt`,
+        content: "blocked",
+        mode: "create",
+        expectedSha256: null,
+      }));
+
+      expect(result).toMatchObject({ status: "failed", error: { category: "workspace_alias_rejected" } });
+      await expect(readFile(join(workspace, directory, "codeflow-short-name-bypass.txt"), "utf8"))
+        .rejects.toMatchObject({ code: "ENOENT" });
+    }
+  });
+
   it("applies a multi-file patch only after Git and file versions match", async () => {
     const patch = [
       "diff --git a/README.md b/README.md",
@@ -184,6 +208,35 @@ describe("workspace write tools", () => {
     await expect(readFile(join(workspace, "README.md"), "utf8")).resolves.toBe("# Fixture\n");
   });
 
+  it("rejects a mismatched patch preimage before private data can be moved or disclosed", async () => {
+    await mkdir(join(workspace, ".codeflow"));
+    await writeFile(join(workspace, ".codeflow", "state.db"), "private-state\n", "utf8");
+    const patch = [
+      "diff --git a/README.md b/README.md",
+      "--- a/.codeflow/state.db",
+      "+++ b/README.md",
+      "@@ -1 +1 @@",
+      "-private-state",
+      "+# Disclosed",
+      "",
+    ].join("\n");
+    const result = await runtime.execute(await request(workspace, "apply_patch", {
+      patch,
+      expectedCodeVersion: codeVersion(workspace),
+      expectedFiles: [
+        { path: "README.md", sha256: digest(await readFile(join(workspace, "README.md"))) },
+      ],
+    }));
+
+    expect(result).toMatchObject({
+      status: "failed",
+      sideEffectStatus: "not_started",
+      error: { category: "patch_preimage_mismatch" },
+    });
+    await expect(readFile(join(workspace, "README.md"), "utf8")).resolves.toBe("# Fixture\n");
+    await expect(readFile(join(workspace, ".codeflow", "state.db"), "utf8")).resolves.toBe("private-state\n");
+  });
+
   it("requires matching task authorization before a write tool starts", async () => {
     const executionRequest = await request(workspace, "write_file", {
       path: "unauthorized.txt",
@@ -249,7 +302,52 @@ describe("workspace write tools", () => {
     expect(externalPath).toMatchObject({ status: "failed", error: { category: "command_argument_denied" } });
     expect(gitCommand).toMatchObject({ status: "failed", error: { category: "command_executable_denied" } });
     await expect(readFile(join(workspace, "command-output.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+
+    const deniedEnvironment = await runtime.execute(await request(workspace, "run_command", {
+      executable: "node",
+      args: ["command.cjs"],
+      env: { DEEPSEEK_API_KEY: "must-be-rejected" },
+      purpose: "A credential override must be denied before execution.",
+    }));
+    expect(deniedEnvironment).toMatchObject({ status: "failed", error: { category: "command_environment_denied" } });
+    await expect(readFile(join(workspace, "command-output.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it.each(["pnpm", "npm"])("runs a real %s package script on the host platform", async (packageManager) => {
+    await writeFile(join(workspace, "package.json"), JSON.stringify({
+      private: true,
+      scripts: { "verify-command": "node package-command.cjs" },
+    }), "utf8");
+    await writeFile(join(workspace, "package-command.cjs"), [
+      "const fs = require('node:fs');",
+      `fs.writeFileSync('${packageManager}-command-marker.txt', 'executed');`,
+      "",
+    ].join("\n"), "utf8");
+    const marker = `${packageManager}-command-marker.txt`;
+
+    const result = await runtime.execute(await request(workspace, "run_command", {
+      executable: packageManager,
+      args: ["run", "verify-command"],
+      timeoutMs: 30_000,
+      purpose: `Verify the controlled ${packageManager} package-script path.`,
+    }));
+
+    expect(result, JSON.stringify(result)).toMatchObject({
+      status: "completed",
+      sideEffectStatus: "applied",
+      output: { exitCode: 0 },
+    });
+    await expect(readFile(join(workspace, marker), "utf8")).resolves.toBe("executed");
+
+    if (process.platform === "win32") {
+      const injection = await runtime.execute(await request(workspace, "run_command", {
+        executable: packageManager,
+        args: ["run", "verify-command&whoami"],
+        purpose: "Command-processor metacharacters must be rejected before execution.",
+      }));
+      expect(injection).toMatchObject({ status: "failed", error: { category: "command_argument_denied" } });
+    }
+  }, 40_000);
 
   it("terminates a timed-out command tree and reports unknown side-effect state", async () => {
     await writeFile(join(workspace, "slow-command.cjs"), [
@@ -273,6 +371,32 @@ describe("workspace write tools", () => {
     });
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_100));
     await expect(readFile(join(workspace, "late-marker.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  }, 10_000);
+
+  it("terminates an aborted command tree without reporting a safe retry", async () => {
+    await writeFile(join(workspace, "abort-command.cjs"), [
+      "setTimeout(() => require('node:fs').writeFileSync('abort-marker.txt', 'unsafe'), 800);",
+      "setTimeout(() => {}, 10000);",
+      "",
+    ].join("\n"), "utf8");
+    const controller = new AbortController();
+    const executionRequest = await request(workspace, "run_command", {
+      executable: "node",
+      args: ["abort-command.cjs"],
+      timeoutMs: 10_000,
+      purpose: "Verify AbortSignal process-tree cleanup.",
+    });
+    setTimeout(() => controller.abort(), 150);
+
+    const result = await runtime.execute({ ...executionRequest, signal: controller.signal });
+
+    expect(result).toMatchObject({
+      status: "unknown",
+      sideEffectStatus: "unknown",
+      error: { category: "cancelled", retryable: false },
+    });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_100));
+    await expect(readFile(join(workspace, "abort-marker.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   }, 10_000);
 });
 
@@ -336,4 +460,27 @@ function git(workspace: string, ...args: readonly string[]): string {
 
 function digest(value: Uint8Array): string {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function windowsShortRelativePath(workspace: string, target: string): string | null {
+  const commandProcessor = process.env.ComSpec ?? process.env.COMSPEC;
+  if (!commandProcessor) return null;
+  const shortWorkspace = windowsShortPath(commandProcessor, workspace);
+  const shortTarget = windowsShortPath(commandProcessor, target);
+  if (!shortWorkspace || !shortTarget) return null;
+  const path = relative(shortWorkspace, shortTarget).replaceAll("\\", "/");
+  return path && !path.startsWith("../") ? path : null;
+}
+
+function windowsShortPath(commandProcessor: string, path: string): string | null {
+  if (path.includes('"')) return null;
+  try {
+    return execFileSync(
+      commandProcessor,
+      ["/d", "/s", "/c", `for %I in ("${path}") do @echo %~sI`],
+      { encoding: "utf8", windowsHide: true },
+    ).trim() || null;
+  } catch {
+    return null;
+  }
 }

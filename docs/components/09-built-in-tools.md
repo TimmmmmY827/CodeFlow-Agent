@@ -203,14 +203,14 @@ output: { exitCode: number | null; stdout: OutputRef; stderr: OutputRef;
           durationMs: number; timedOut: boolean }
 ```
 
-- 默认不用 shell 字符串；确需 shell 的命令必须单独标记和审查。
+- 默认不用 shell 字符串；Windows 的 pnpm/npm `.cmd` shim 只能通过固定 `cmd.exe /d /s /c call` 桥接，shim 必须先由 PATH 解析为真实文件，用户参数必须拒绝 cmd 元字符后逐项加引号。除此之外不得调用 shell。
 - 过滤提权、系统配置、破坏性 Git、工作区外删除和凭证读取。
 - 取消终止进程树；5 秒未终止标记错误和剩余进程证据。
 - 即使 exit 0 也不自动等于任务验证通过。
 
-当前实现进一步冻结以下边界：只接受 executable + args 数组并强制 `shell=false`；可执行文件限于 Node/Python 测试入口、pnpm/npm 已有脚本和 Go 构建/测试命令；Git 读取必须使用已有专用工具，`run_command` 不接受 Git。拒绝内联 Node/Python、依赖安装、可执行文件路径、显式工作区外路径参数和非 allowlist 环境变量。子进程仅继承启动所需的最小基础环境，不继承 `DEEPSEEK_API_KEY` 等凭证。stdout/stderr 各限制为 1 MB，超限显式标记 truncated；取消或 timeout 后终止进程树，结果按副作用未知处理。
+当前实现进一步冻结以下边界：只接受 executable + args 数组；除上述 Windows package shim 桥接外均强制 `shell=false`。可执行文件限于 Node/Python 测试入口、pnpm/npm 已有脚本和 Go 构建/测试命令；Git 读取必须使用已有专用工具，`run_command` 不接受 Git。拒绝内联 Node/Python、依赖安装、可执行文件路径、显式工作区外路径参数和非 allowlist 环境变量。子进程和 Windows `taskkill` 仅继承启动所需的最小基础环境，不继承 `DEEPSEEK_API_KEY` 等凭证。stdout/stderr 各限制为 1 MB，超限显式标记 truncated；取消或 timeout 后终止进程树，结果按副作用未知处理。
 
-该切片不声称提供强 OS 文件系统隔离：仓库自身的脚本仍以当前用户权限运行。将 `run_command` 扩展到更宽的可执行文件/参数前，必须由后续 C08 sandbox 能力提供可验证的工作区写约束；当前依靠任务授权、命令/参数 allowlist、受控 cwd、最小环境和进程树终止缩小边界。
+该切片不声称提供强 OS 文件系统隔离：仓库自身的脚本仍以当前用户权限运行，最小基础环境仍包含 PATH、APPDATA、USERPROFILE 和 TEMP 等进程启动/工具发现信息；Windows 使用 `taskkill /T /F` 终止可控进程树，但脱离该树的孤儿进程仍需后续 Job Object sandbox 治理。将 `run_command` 扩展到更宽的可执行文件/参数前，必须由后续 C08 sandbox 能力提供可验证的工作区写约束；当前依靠任务授权、命令/参数 allowlist、受控 cwd、最小环境和进程树终止缩小边界。
 
 ### `delete_file`
 
@@ -334,11 +334,11 @@ output: { commitSha: string; remoteBranch: string; prUrl: string;
 
 ### 11.2 Issue #7 工作区写切片（已冻结）
 
-`apply_patch`、`write_file` 和 `run_command` 均声明 workspace write claim；文件工具额外声明规范化 path claim。`apply_patch` 只接受无 rename/copy/delete/binary 的统一 Git patch，要求 patch 目标与 `expectedFiles` 精确一致，并在 `git apply --check`、再次 CAS 校验后执行；`write_file` 使用同目录临时文件、create 不覆盖和 replace hash CAS；二者拒绝工作区越界、`.git`、`.codeflow`、`artifacts`、`node_modules` 以及路径中的 link/junction。`run_command` 遵循上一节冻结的 allowlist、环境、输出和进程树边界。
+`apply_patch`、`write_file` 和 `run_command` 均声明 workspace write claim；文件工具额外声明规范化 path claim。`apply_patch` 只接受无 rename/copy/delete/binary 的统一 Git patch，强制每个 `---` preimage 与 `+++` target 为同一路径（新文件只能来自 `/dev/null`），要求 patch 目标与 `expectedFiles` 精确一致，并在 `git apply --check`、再次版本校验后执行；执行后 Git status 不得出现声明集合外的新变更。`write_file` 使用同目录临时文件、create 不覆盖，replace 在 rename 前再次校验 hash；该校验在当前单 Runtime 模型内提供 CAS 证据，但 C08 workspace lock 完成前不声称能阻止外部进程在最终校验与 rename 之间竞态写入。二者拒绝工作区越界、`.git`、`.codeflow`、`artifacts`、`node_modules`、路径中的 link/junction，以及 Windows 8.3/大小写等真实路径与词法路径不一致的别名；真实路径解析后会再次执行保留目录 denylist。`run_command` 遵循上一节冻结的 allowlist、环境、输出和进程树边界。
 
 所有三者必须携带匹配 Session/Task/workspace/policy version 的 `TaskAuthorization`，且必须先由 durable journal 记录 started；缺失授权或 journal 时 execute 次数为零。Provider 能证明未开始的失败返回 `failed/not_started`；命令 timeout、补丁提交状态无法确认或写后验证失败返回 `unknown/unknown`，禁止盲目重试。当前 C08 workspace 锁管理和强 OS sandbox 仍延期，因此本切片只证明单 Runtime 顺序执行下的资源声明与边界，不把跨 Runtime 并发或恶意仓库脚本隔离标记为完成。
 
-确定性证据位于 `tests/workspace-write-tools.test.ts` 和 `tests/tool-runtime.test.ts`：覆盖 create/replace CAS、多文件 patch、部分 hunk 失败零修改、越界/保留目录/link 拒绝、TaskAuthorization 拒绝、秘密环境过滤、内联命令拒绝、timeout 进程树清理，以及 structured unknown 状态保持。
+确定性证据位于 `tests/workspace-write-tools.test.ts` 和 `tests/tool-runtime.test.ts`：覆盖 create/replace 版本校验、多文件 patch、部分 hunk 失败零修改、伪造 preimage 外泄拒绝、越界/保留目录/link/Windows 8.3 别名拒绝、TaskAuthorization 拒绝、秘密环境过滤、内联命令拒绝、Windows 真实 pnpm/npm 脚本、cmd 元字符拒绝、timeout/abort 进程树清理，以及 structured unknown 状态保持。
 
 - `TOOLS-AC-001`：18 个 ToolDefinition 全部通过 schema、策略组合和模型投影测试。
 - `TOOLS-AC-002`：所有文件/命令路径穿越、junction 和并发版本 fixture 被阻止。
