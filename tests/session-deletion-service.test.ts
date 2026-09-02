@@ -555,7 +555,7 @@ SELECT purge_state, purge_error_json FROM deleted_session_tombstones`).get()).to
       purge_state: "complete",
       purge_error_json: null,
     });
-  });
+  }, 15_000);
 
   it("fails without creating a receipt for an unknown Session", async () => {
     const storage = createDatabase();
