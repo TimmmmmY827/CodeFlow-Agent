@@ -50,17 +50,46 @@ export type {
   SessionTaskTreeViewModel,
 } from "./cli/ui/session-task-tree-projector.js";
 export {
+  COMPLETION_DECISION_SCHEMA_VERSION,
+  COMPLETION_EVIDENCE_SCHEMA_VERSION,
+  COMPLETION_GATE_CONTEXT_SCHEMA_VERSION,
+  COMPLETION_GATE_VERSION,
+  COMPLETION_INTENT_SCHEMA_VERSION,
   CompletionGate,
-  completionClaimSchema,
   completionDecisionSchema,
+  completionGateContextSchema,
+  completionIntentSchema,
+  completionReasonCodeSchema,
+  completionReasonSchema,
+  hashCompletionRecord,
   safetyVetoSchema,
+  traceIntegrityReportSchema,
+  verificationEvidenceSchema,
 } from "./completion/completion-gate.js";
 export type {
-  CompletionClaim,
   CompletionDecision,
-  CompletionSnapshot,
+  CompletionGateContext,
+  CompletionGateContextProvider,
+  CompletionGateContextRequest,
+  CompletionIntent,
+  CompletionReason,
+  CompletionReasonCode,
   SafetyVeto,
+  VerificationEvidence,
 } from "./completion/completion-gate.js";
+export { WorkspaceCodeSnapshotProvider } from "./completion/code-snapshot-provider.js";
+export {
+  CompletionContextError,
+  TrustedCompletionContextProvider,
+} from "./completion/completion-context.js";
+export type {
+  CodeSnapshotProvider,
+  CompletionEvidenceCandidate,
+  CompletionEvidenceProvider,
+  CompletionOperationProvider,
+  CompletionOperationStatus,
+  CompletionSafetyProvider,
+} from "./completion/completion-context.js";
 export { ContextAssembler } from "./context/context-assembler.js";
 export {
   EVALUATION_SUITE_SCHEMA_VERSION,
@@ -281,7 +310,7 @@ export type {
   ToolRisk,
   ToolSideEffect,
 } from "./tools/tool.js";
-export { createFinishTaskTool } from "./tools/builtin/finish-task.js";
+export { createFinishTaskTool, registerFinishTaskTool } from "./tools/builtin/finish-task.js";
 export {
   createGitDiffTool,
   createGitLogTool,

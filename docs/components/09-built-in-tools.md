@@ -1,6 +1,6 @@
 # C09 18 个内置工具与外部 Provider
 
-- 状态：Issue #7 六个本地只读工具、三个工作区写工具（`apply_patch`、`write_file`、`run_command`）和 `finish_task` 工厂已迁移至 C07/C08 执行边界；其余八项待实现
+- 状态：Issue #7 六个本地只读工具、三个工作区写工具（`apply_patch`、`write_file`、`run_command`）和 C10 `finish_task@2` 注册工厂已迁移至 C07/C08 执行边界；其余八项待实现
 - 目标阶段：D3–D6
 - 代码位置：建议 `src/tools/builtin/`、`src/providers/`
 - 硬依赖：[C00](00-shared-contracts.md)、[C02](02-storage-artifacts.md)、[C03](03-permission-engine.md)、[C07](07-tool-registry.md)、[C08](08-tool-runtime.md)；`finish_task` 切片额外依赖 [C10](10-completion-gate.md)
@@ -27,7 +27,7 @@ Provider 管理 OS/SDK/CLI 细节；ToolDefinition 管理模型可见 schema；T
 
 ## 3. 总清单与依赖顺序
 
-当前 Registry 可注册 `list_files`、`search_text`、`read_file`、`git_status`、`git_diff`、`git_log`、`apply_patch`、`write_file`、`run_command` 和 `finish_task` 工厂；本节其余八项及相应 Provider 仍是目标目录（规划中）。写工具只通过 `ToolRegistry -> PermissionEngine -> ToolRuntime -> ExecutionJournal` 开始，统一使用 `task_authorized + workspace_write + never`，不会接入当前只读生产 Runner 形成旁路。
+当前 Registry 可注册 `list_files`、`search_text`、`read_file`、`git_status`、`git_diff`、`git_log`、`apply_patch`、`write_file`、`run_command` 和 `finish_task@2`；本节其余八项及相应 Provider 仍是目标目录（规划中）。写工具只通过 `ToolRegistry -> PermissionEngine -> ToolRuntime -> ExecutionJournal` 开始，统一使用 `task_authorized + workspace_write + never`，不会接入当前只读生产 Runner 形成旁路。
 
 | 顺序 | 工具 | 风险 | 副作用 | 重试 | 阶段 |
 | --- | --- | --- | --- | --- | --- |
@@ -162,7 +162,7 @@ output: { acceptedRevision: number }
 
 ### `finish_task`
 
-输入使用 C10 `CompletionIntent`，只包含模型总结、观察到的版本和证据引用；输出为 C10 根据可信 `CompletionGateContext` 计算的 verified/rejected 及原因。
+输入使用 C10 `CompletionIntent`，只包含模型总结、观察到的版本和证据引用；输出为 C10 根据可信 `CompletionGateContext` 计算的版本化 verified/rejected decision、稳定 reason codes 和下一动作。Context Provider 失败只返回 `gate_context_unavailable`，不得改用输入中伪造的 trace、veto 或 verification。
 
 - 必须注入真实 CodeSnapshotProvider。
 - rejected 不终止 Session，Loop 回 RUNNING 并展示缺失证据。

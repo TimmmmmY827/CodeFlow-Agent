@@ -1,6 +1,6 @@
 # C10 CompletionGate 与完成声明
 
-- 状态：旧版 CompletionClaim 基础校验、可审计 SafetyVeto 和 `finish_task` 工厂已实现；CompletionIntent/GateContext、完整 evidence、稳定 reason code 和真实证据 Provider 未接
+- 状态：CompletionIntent/GateContext、纯 Gate、稳定 reason code、Git/普通工作区 CodeSnapshot、Artifact 复核、`finish_task@2` 注册工厂和只读 C11 完成事件链已实现；通用写任务的持久 Evidence/Safety/Operation Provider 接线随 C11 完整循环交付
 - 目标阶段：D4
 - 代码位置：`src/completion/completion-gate.ts`、`src/tools/builtin/finish-task.ts`
 - 硬依赖：[C00](00-shared-contracts.md)、[C01](01-event-state.md)、[C02](02-storage-artifacts.md)
@@ -28,26 +28,32 @@
 
 ```ts
 interface CompletionIntent {
-  intentVersion: number;
-  observedCodeVersion: CodeSnapshot["codeVersion"];
-  observedDiffHash: CodeSnapshot["diffHash"];
+  schemaVersion: 1;
+  observedCodeVersion: NonNullable<CodeSnapshot["codeVersion"]>;
+  observedDiffHash: NonNullable<CodeSnapshot["diffHash"]>;
   evidenceIds: StableId[];
   unverifiedItems: { description: string; blocking: boolean }[];
   summary: string;
 }
 
 interface VerificationEvidence {
-  schemaVersion: number;
+  schemaVersion: 1;
   id: StableId;
   name: string;
   kind: "test" | "build" | "lint" | "static" | "manual" | "runtime";
   required: boolean;
   status: "passed" | "failed" | "not_run";
-  commandOrProcedure: string;
+  commandOrProcedure: string | null;
   artifact: ArtifactReference | null;
+  artifactVerification: "not_applicable" | "verified" | "missing_or_corrupt";
   codeVersion: CodeSnapshot["codeVersion"];
   diffHash: CodeSnapshot["diffHash"];
   producedBy: { kind: "tool" | "user" | "system"; referenceId: StableId };
+  manualAcceptance: {
+    acceptedBy: string;
+    criteria: string;
+    acceptedAt: UtcTimestamp;
+  } | null;
   verifiedAt: UtcTimestamp;
 }
 
@@ -59,8 +65,8 @@ interface SafetyVeto {
 }
 
 interface CompletionGateContext {
-  schemaVersion: number;
-  gateVersion: string;
+  schemaVersion: 1;
+  gateVersion: "completion-gate:v1";
   sessionId: StableId;
   runId: StableId;
   snapshot: CodeSnapshot;
@@ -72,9 +78,15 @@ interface CompletionGateContext {
 }
 ```
 
-`CompletionIntent` 来自模型，因此所有字段都不具备事实权威性；observed version 只用于检测陈旧意图，evidence ID 必须由系统解析。`CompletionGateContext` 只能由 C11 从 C01 trace integrity、C02 Artifact verifier、当前 CodeSnapshot 和 C03/C08 安全/operation ledger 组装。模型不能提交、覆盖或删减 `traceIntegrity`、`safetyVetoes`、活动操作和未知操作。
+`CompletionIntent` 来自模型，因此所有字段都不具备事实权威性；observed version 只用于检测陈旧意图，evidence ID 必须由系统解析。`CompletionGateContext` 由 `TrustedCompletionContextProvider` 从 C01 trace integrity、C02 Artifact verifier、当前 CodeSnapshot 和 C03/C08 安全/operation ledger 的注入端口组装。模型不能提交、覆盖或删减 `traceIntegrity`、`safetyVetoes`、活动操作和未知操作。
 
-当前实现仍使用可自报 `traceComplete`、verification 和 safetyVetoes 的 `CompletionClaim`，只代表可编译基线；接线真实 `finish_task` 前必须迁移到上述目标契约。当前 `SafetyVeto` 至少引用 event 或 Artifact 的校验继续保留。
+`artifactVerification` 只能由 Context 组装器调用 C02 `ArtifactStore.verify` 后写入，Evidence Provider 不能自报该结果。Artifact 校验抛错按 `missing_or_corrupt` fail closed。manual evidence 必须同时记录用户来源、验收者、条件、时间和代码/diff 绑定。`SafetyVeto` 至少引用 event 或 Artifact；恶意 intent 中额外的 trace/evidence/veto 字段因 strict schema 被拒绝。
+
+## 3.1 已实现 Provider
+
+- `WorkspaceCodeSnapshotProvider`：Git 工作区绑定真实 HEAD；unborn 仓库使用明确的 `git:unborn-*` 版本；普通/空目录使用稳定 workspace identity。diff hash 覆盖 tracked、staged 和 untracked 文件内容，并排除应用私有 `.git`/`.codeflow` 数据。
+- `TrustedCompletionContextProvider`：并行取得 Event、Snapshot、Evidence、Safety 和 Operation facts，再独立复核 Artifact 并执行版本化 schema 校验；任一 Provider 失败抛出稳定 `completion_context_unavailable`，`finish_task` 转成 fail-closed rejected decision。
+- C11 当前只读 runner：把 durable `verification.completed` event ID 转换为 system Evidence，在 `completion.claimed` 后重新捕获 snapshot 和 trace，再输出 `completion.verified` 或 `completion.rejected`；不复制模型 summary、日志正文或秘密到完成事件。
 
 ## 4. 判定顺序
 
@@ -89,6 +101,8 @@ interface CompletionGateContext {
 9. 输出 verified；否则一次返回全部可修复原因。
 
 安全否决优先级最高，但 Gate 仍可收集其他原因用于调试。
+
+Decision 固定携带 `schemaVersion`、`gateVersion`、`intentHash`、`contextHash`、被引用的 evidence IDs，以及 `{ code, message, nextAction, evidenceId, vetoCode, operationIds }` 结构化原因。未知 intent/context 主版本与普通字段错误使用不同稳定 code；Context 无法组装时 `contextHash = null`，不得回退到 intent 自报事实。
 
 ## 5. Outcome 规则
 
@@ -155,10 +169,16 @@ interface CompletionGateContext {
 - `GATE-AC-007`：恶意 intent 无法通过自报 traceComplete=true、空 veto 或伪造 passed evidence 绕过系统 Context。
 - `GATE-AC-008`：存在未结束/UNKNOWN operation 时，即使全部测试通过也拒绝完成。
 
+## 10.1 验收证据
+
+- `tests/completion-gate.test.ts`：覆盖 intent/context 版本、代码/diff、required evidence 引用、failed/not-run、Artifact 缺失/损坏、manual acceptance、trace、veto、active/UNKNOWN operation、blocking item、恶意自报字段、Context Provider fail-closed、`finish_task@2` 注册，以及 E1 六任务确定性重放。
+- `tests/code-snapshot-provider.test.ts`：覆盖 Git HEAD、tracked/untracked 内容变化、unborn Git、普通/空目录和嵌套 `.codeflow` 排除。
+- `tests/agent-event-loop-e2e.test.ts`：覆盖 verification -> claimed -> verified 与 snapshot 漂移后的 claimed -> rejected 完整 durable 事件链。
+
 ## 11. 实现任务建议
 
-1. 将旧 CompletionClaim 迁移为 CompletionIntent/GateContext，并扩展 evidence/reason schema 和版本。
-2. 实现 Git/空目录 CodeSnapshotProvider。
-3. 实现 trace completeness 与 Artifact verifier。
-4. 将 finish_task 注册并接 C11 事件转换。
-5. 建 Bug/功能两类 Gate fixture 和安全否决测试。
+1. 已完成：将旧 CompletionClaim 迁移为 CompletionIntent/GateContext，并扩展 evidence/reason schema 和版本。
+2. 已完成：实现 Git/unborn/普通空目录 CodeSnapshotProvider。
+3. 已完成：实现 trace completeness 与 Artifact verifier 组装边界。
+4. 已完成：提供 finish_task 注册工厂并接 C11 当前只读事件转换；通用模型发起 `finish_task` 的循环接线归 C11 完整写任务切片。
+5. 已完成：建立组合 Gate、E1 六任务重放和安全否决测试。

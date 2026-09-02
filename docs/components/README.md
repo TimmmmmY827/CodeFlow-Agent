@@ -37,7 +37,7 @@
 | C07 | [ToolDefinition 与 ToolRegistry](07-tool-registry.md) | D1–D3 | 版本化契约、schema hash、availability、资源声明和稳定目录已实现；18 工具全集延期 | C00 | Runtime、Context、Loop |
 | C08 | [ToolRuntime](08-tool-runtime.md) | D3–D4 | 已接完整 OperationBinding、C03 权限、批准消费 + 预算 + started 原子事务和 journal 结算；锁、timeout 与独立 operation 恢复延期 | C00–C04、C07（不含 C05/C06） | 内置工具、Loop、Trace |
 | C09 | [18 个内置工具与外部 Provider](09-built-in-tools.md) | D3–D6 | 六个版本化本地只读工具 + 三个工作区写工具 + `finish_task`；其余八项延期 | C00、C02、C03、C07、C08；finish 依赖 C10 | Loop、CLI、Eval |
-| C10 | [CompletionGate](10-completion-gate.md) | D4 | 旧版 Gate；可信 Context/evidence 缺失 | C00、C01、C02 | 内置 finish、Loop、CLI、Eval |
+| C10 | [CompletionGate](10-completion-gate.md) | D4 | 版本化 Intent/可信 Context、纯 Gate、Snapshot/Artifact Provider、稳定原因和只读完成事件链已实现；通用写任务 Provider 接线归 C11 | C00、C01、C02 | 内置 finish、Loop、CLI、Eval |
 | C11 | [AgentEventLoop](11-agent-event-loop.md) | D3–D4 | 最小持久只读 ReAct；恢复/HITL/写延期 | C01–C10 | Application、CLI、Eval |
 | C12 | [Application Service](12-application-service.md) | D3–D7 | 单次只读生产 runner + replay-tail source | C02–C11 | CLI、Session 命令、Eval |
 | C13 | [CLI/TUI 与 HITL](13-cli-tui.md) | D5 | `run` 已接实时只读任务树；resume/HITL 延期 | C01、C03、C04、C11、C12、C14 | 用户、Eval |

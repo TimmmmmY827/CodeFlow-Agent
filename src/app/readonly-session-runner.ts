@@ -1,10 +1,10 @@
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { AgentEventLoop, type RunReadonlySessionResult } from "../agent/agent-event-loop.js";
-import { CompletionGate, type CompletionSnapshot } from "../completion/completion-gate.js";
+import { WorkspaceCodeSnapshotProvider } from "../completion/code-snapshot-provider.js";
+import { CompletionGate } from "../completion/completion-gate.js";
 import { createAgentEvent, createEventContext } from "../events/agent-event.js";
 import { reduceAgentEvents } from "../events/state-reducer.js";
 import { DeepSeekChatAdapter } from "../model/deepseek-chat-adapter.js";
@@ -139,16 +139,15 @@ export async function startReadonlySession(
     });
     const journal = new SqliteExecutionJournal(storage, events, ledger);
     const runtime = new ToolRuntime(registry, new PermissionEngine(clock), { journal });
-    // Capture after private storage exists so an untracked .codeflow directory
-    // has the same Git representation at admission and completion.
-    const initialSnapshot = await captureWorkspaceSnapshot(workspace);
+    const completionSnapshotProvider = new WorkspaceCodeSnapshotProvider();
+    const initialSnapshot = await completionSnapshotProvider.capture(workspace, configVersion);
     const loop = new AgentEventLoop(events, {
       modelAdapter: dependencies.modelAdapter,
       toolRegistry: registry,
       toolRuntime: runtime,
       journal,
       completionGate: new CompletionGate(),
-      completionSnapshotProvider: { capture: async () => await captureWorkspaceSnapshot(workspace) },
+      completionSnapshotProvider,
       maxSteps: dependencies.maxSteps ?? 4,
       maxOutputTokens: dependencies.maxOutputTokens ?? 512,
     });
@@ -289,48 +288,6 @@ function assertPrivateDataDirectory(workspace: string, dataDirectory: string): v
   const segments = relativePath.split(path.sep).filter(Boolean);
   if (segments.some((segment) => (process.platform === "win32" ? segment.toLowerCase() : segment) === ".codeflow")) return;
   throw new TypeError("A data directory inside the workspace must be nested under .codeflow.");
-}
-
-async function captureWorkspaceSnapshot(workspace: string): Promise<CompletionSnapshot> {
-  const head = await runGit(workspace, ["rev-parse", "--verify", "HEAD"]).catch(() => "");
-  const status = await runGit(workspace, ["status", "--porcelain=v1", "-z", "--untracked-files=normal", "--", "./"])
-    .catch(() => "workspace-unversioned");
-  const diff = head
-    ? await runGit(workspace, ["diff", "--no-ext-diff", "--binary", "HEAD", "--", "./"]).catch(() => "diff-unavailable")
-    : "";
-  return {
-    codeVersion: head ? `git:${head.trim()}` : `workspace:${digest(normalizeWorkspaceIdentity(workspace)).slice("sha256:".length)}`,
-    diffHash: digest(`${status}\u0000${diff}`),
-  };
-}
-
-async function runGit(workspace: string, args: readonly string[]): Promise<string> {
-  return await new Promise<string>((resolvePromise, rejectPromise) => {
-    execFile(
-      "git",
-      ["--no-optional-locks", ...args],
-      {
-        cwd: workspace,
-        windowsHide: true,
-        timeout: 10_000,
-        maxBuffer: 8 * 1024 * 1024,
-        encoding: "utf8",
-        env: gitEnvironment(),
-      },
-      (error, stdout) => error ? rejectPromise(error) : resolvePromise(stdout),
-    );
-  });
-}
-
-function gitEnvironment(): NodeJS.ProcessEnv {
-  const allowed = new Set(["APPDATA", "COMSPEC", "HOME", "LANG", "LC_ALL", "LOCALAPPDATA", "PATH", "PATHEXT", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE"]);
-  const environment: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && allowed.has(key.toUpperCase())) environment[key] = value;
-  }
-  environment.GIT_OPTIONAL_LOCKS = "0";
-  environment.GIT_TERMINAL_PROMPT = "0";
-  return environment;
 }
 
 async function recordUnexpectedFailure(
