@@ -1,7 +1,19 @@
 import { createHash } from "node:crypto";
 
-import { CompletionGate, type CompletionClaim } from "../completion/completion-gate.js";
-import { createAgentEvent, createEventContext } from "../events/agent-event.js";
+import type { CodeSnapshotProvider } from "../completion/completion-context.js";
+import {
+  COMPLETION_EVIDENCE_SCHEMA_VERSION,
+  COMPLETION_GATE_CONTEXT_SCHEMA_VERSION,
+  COMPLETION_GATE_VERSION,
+  COMPLETION_INTENT_SCHEMA_VERSION,
+  CompletionGate,
+  hashCompletionRecord,
+  type CompletionGateContext,
+  type CompletionIntent,
+  type SafetyVeto,
+  type VerificationEvidence,
+} from "../completion/completion-gate.js";
+import { createAgentEvent, createEventContext, type AgentEvent } from "../events/agent-event.js";
 import type { ExecutionIdentity, ExecutionJournal, FinishExecutionInput } from "../events/execution-journal.js";
 import type { EventStore } from "../events/event-store.js";
 import { checkTraceIntegrity } from "../events/state-reducer.js";
@@ -9,8 +21,7 @@ import { estimateDeepSeekCostUsd, priceDeepSeekUsage } from "../model/deepseek-p
 import { ModelAdapterError, type ModelAdapter, type ModelInputItem } from "../model/model-adapter.js";
 import { budgetDeltaSchema } from "../policy/budget-contracts.js";
 import { canonicalJson } from "../shared/json.js";
-import { createStableId, structuredErrorSchema, type StableId, type StructuredError, type UtcTimestamp } from "../shared/contracts.js";
-import type { CompletionSnapshotProvider } from "../tools/builtin/finish-task.js";
+import { createStableId, stableIdSchema, structuredErrorSchema, type StableId, type StructuredError, type UtcTimestamp } from "../shared/contracts.js";
 import type { ToolRegistry } from "../tools/tool-registry.js";
 import type { ToolRuntime } from "../tools/tool-runtime.js";
 
@@ -46,7 +57,7 @@ export interface AgentEventLoopOptions {
   readonly toolRegistry: ToolRegistry;
   readonly toolRuntime: ToolRuntime;
   readonly journal: ExecutionJournal;
-  readonly completionSnapshotProvider: CompletionSnapshotProvider;
+  readonly completionSnapshotProvider: CodeSnapshotProvider;
   readonly completionGate?: CompletionGate;
   readonly maxSteps?: number;
   readonly maxOutputTokens?: number;
@@ -263,7 +274,7 @@ export class AgentEventLoop {
       await options.journal.append({ identity: request, type: "verification.started", payload: { verifier: "readonly_trace" } });
       const beforeVerification = checkTraceIntegrity(await this.eventStore.list(request.sessionId));
       const verificationPassed = beforeVerification.complete && toolCalls > 0;
-      await options.journal.append({ identity: request, type: "verification.completed", payload: { passed: verificationPassed, verifier: "readonly_trace" } });
+      const verificationEvent = await options.journal.append({ identity: request, type: "verification.completed", payload: { passed: verificationPassed, verifier: "readonly_trace" } });
       if (!verificationPassed) {
         return {
           status: "failed",
@@ -274,24 +285,95 @@ export class AgentEventLoop {
         };
       }
 
-      const snapshot = await options.completionSnapshotProvider.capture(request.workspacePath);
-      const trace = checkTraceIntegrity(await this.eventStore.list(request.sessionId));
-      const claim: CompletionClaim = {
-        codeVersion: request.codeVersion ?? "workspace:unversioned",
-        diffHash: request.diffHash ?? "sha256:unversioned",
-        traceComplete: trace.complete,
-        verification: [{ name: "readonly_trace", required: true, status: "passed", evidence: response.responseId }],
-        unverifiedItems: [],
-        safetyVetoes: [],
-      };
-      const decision = completionGate.evaluate(claim, snapshot);
-      if (decision.outcome !== "verified") {
-        const error = failureError("completion_rejected", decision.reasons.join("; "), false, "Refresh the code snapshot and verification evidence before retrying completion.");
-        await options.journal.append({ identity: request, type: "session.failed", error, payload: { reasons: [...decision.reasons] } });
+      const evidenceSnapshot = await options.completionSnapshotProvider.capture(request.workspacePath, request.configVersion);
+      if (evidenceSnapshot.codeVersion === null || evidenceSnapshot.diffHash === null) {
+        const error = failureError("completion_snapshot_unavailable", "Completion snapshot did not contain a code version and diff hash.", false, "Repair the trusted snapshot provider before retrying completion.");
+        await options.journal.append({ identity: request, type: "session.failed", error });
         return { status: "failed", outputText: null, modelAttempts, toolCalls, error };
       }
-      await options.journal.append({ identity: request, type: "completion.claimed", payload: { responseId: response.responseId, verifier: "readonly_trace" } });
-      await options.journal.append({ identity: request, type: "completion.verified", payload: { responseId: response.responseId } });
+      const evidence: VerificationEvidence = {
+        schemaVersion: COMPLETION_EVIDENCE_SCHEMA_VERSION,
+        id: verificationEvent.eventId,
+        name: "readonly_trace",
+        kind: "runtime",
+        required: true,
+        status: "passed",
+        commandOrProcedure: "C01 trace integrity check with at least one completed read-only tool call",
+        artifact: null,
+        artifactVerification: "not_applicable",
+        codeVersion: evidenceSnapshot.codeVersion,
+        diffHash: evidenceSnapshot.diffHash,
+        producedBy: { kind: "system", referenceId: verificationEvent.eventId },
+        manualAcceptance: null,
+        verifiedAt: verificationEvent.occurredAt,
+      };
+      const intent: CompletionIntent = {
+        schemaVersion: COMPLETION_INTENT_SCHEMA_VERSION,
+        observedCodeVersion: evidenceSnapshot.codeVersion,
+        observedDiffHash: evidenceSnapshot.diffHash,
+        evidenceIds: [evidence.id],
+        unverifiedItems: [],
+        summary: response.outputText,
+      };
+      await options.journal.append({
+        identity: request,
+        type: "completion.claimed",
+        payload: {
+          intentSchemaVersion: COMPLETION_INTENT_SCHEMA_VERSION,
+          intentHash: hashCompletionRecord(intent),
+          observedCodeVersion: intent.observedCodeVersion,
+          observedDiffHash: intent.observedDiffHash,
+          evidenceIds: [...intent.evidenceIds],
+        },
+      });
+      const completionEvents = await this.eventStore.list(request.sessionId);
+      const operationStatus = deriveOperationStatus(completionEvents);
+      const context: CompletionGateContext = {
+        schemaVersion: COMPLETION_GATE_CONTEXT_SCHEMA_VERSION,
+        gateVersion: COMPLETION_GATE_VERSION,
+        sessionId: request.sessionId,
+        runId: request.taskId,
+        snapshot: await options.completionSnapshotProvider.capture(request.workspacePath, request.configVersion),
+        traceIntegrity: checkTraceIntegrity(completionEvents),
+        evidence: [evidence],
+        safetyVetoes: deriveSafetyVetoes(completionEvents),
+        activeOperationIds: operationStatus.activeOperationIds,
+        unknownOperationIds: operationStatus.unknownOperationIds,
+      };
+      const decision = completionGate.evaluate(intent, context);
+      if (decision.outcome !== "verified") {
+        const error = failureError("completion_rejected", decision.reasons.map((item) => item.message).join("; "), false, decision.reasons[0]?.nextAction ?? "Refresh trusted completion evidence before retrying.");
+        await options.journal.append({
+          identity: request,
+          type: "completion.rejected",
+          error,
+          payload: {
+            intentSchemaVersion: COMPLETION_INTENT_SCHEMA_VERSION,
+            contextSchemaVersion: COMPLETION_GATE_CONTEXT_SCHEMA_VERSION,
+            gateVersion: decision.gateVersion,
+            intentHash: decision.intentHash,
+            contextHash: decision.contextHash,
+            reasonCodes: decision.reasons.map((item) => item.code),
+            evidenceIds: [...decision.evidenceIds],
+            evidenceSetHash: hashOperation([...decision.evidenceIds].sort()),
+          },
+        });
+        return { status: "failed", outputText: null, modelAttempts, toolCalls, error };
+      }
+      await options.journal.append({
+        identity: request,
+        type: "completion.verified",
+        payload: {
+          intentSchemaVersion: COMPLETION_INTENT_SCHEMA_VERSION,
+          contextSchemaVersion: COMPLETION_GATE_CONTEXT_SCHEMA_VERSION,
+          gateVersion: decision.gateVersion,
+          intentHash: decision.intentHash,
+          contextHash: decision.contextHash,
+          evidenceIds: [...decision.evidenceIds],
+          evidenceSetHash: hashOperation([...decision.evidenceIds].sort()),
+          traceIntegrityReference: `session:${request.sessionId}:sequence:${completionEvents.at(-1)?.sequence ?? 0}`,
+        },
+      });
       return { status: "completed", outputText: response.outputText, modelAttempts, toolCalls, error: null };
     }
 
@@ -343,6 +425,70 @@ async function finishModelExecution(
 
 function hashOperation(input: unknown): string {
   return `sha256:${createHash("sha256").update(canonicalJson(input)).digest("hex")}`;
+}
+
+function deriveOperationStatus(events: readonly AgentEvent[]): {
+  readonly activeOperationIds: StableId[];
+  readonly unknownOperationIds: StableId[];
+} {
+  const active = new Set<StableId>();
+  const unknown = new Set<StableId>();
+  for (const event of events) {
+    const operationId = stablePayloadId(event, "operationId");
+    if (operationId === null) continue;
+    if (event.type === "model.started" || event.type === "tool.started") {
+      active.add(operationId);
+    } else if (event.type === "model.completed" || event.type === "tool.completed" || event.type === "tool.failed") {
+      active.delete(operationId);
+    } else if (event.type === "operation.unknown") {
+      active.add(operationId);
+      unknown.add(operationId);
+    } else if (event.type === "operation.reconciled") {
+      const outcome = event.payload.outcome;
+      if (outcome === "applied" || outcome === "not_applied") {
+        active.delete(operationId);
+        unknown.delete(operationId);
+      } else {
+        active.add(operationId);
+        unknown.add(operationId);
+      }
+    }
+  }
+  return { activeOperationIds: [...active].sort(), unknownOperationIds: [...unknown].sort() };
+}
+
+function deriveSafetyVetoes(events: readonly AgentEvent[]): SafetyVeto[] {
+  const safetyCategories = new Set([
+    "destructive_git_rejected",
+    "patch_change_set_unverified",
+    "protected_path_rejected",
+    "secret_exposure_detected",
+    "unauthorized_operation",
+    "workspace_alias_rejected",
+    "workspace_boundary_violation",
+    "workspace_link_rejected",
+  ]);
+  return events.flatMap((event) => {
+    const explicitCode = event.payload.safetyVetoCode;
+    const error = event.context.error;
+    const code = event.context.sideEffectStatus === "unknown"
+      ? "unknown_side_effect"
+      : typeof explicitCode === "string"
+      ? explicitCode
+      : error && safetyCategories.has(error.category) ? error.category : null;
+    if (code === null || !/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(code)) return [];
+    return [{
+      code,
+      description: error?.message ?? "A durable safety fact blocks completion.",
+      eventId: event.eventId,
+      artifact: null,
+    }];
+  });
+}
+
+function stablePayloadId(event: AgentEvent, field: string): StableId | null {
+  const parsed = stableIdSchema.safeParse(event.payload[field]);
+  return parsed.success ? parsed.data : null;
 }
 
 function deadlineExceeded(deadlineAt: UtcTimestamp | null): boolean {

@@ -1,6 +1,6 @@
 # C11 AgentEventLoop
 
-- 状态：Issue #7 最小持久只读 ReAct 循环已实现；恢复、HITL、写工具仍待开发
+- 状态：Issue #7 最小持久只读 ReAct 循环和 C10 可信完成事件链已实现；通用模型 `finish_task` 调度、恢复、HITL、写工具仍待开发
 - 目标阶段：D3–D4，D5–D7 接入 UI/持久化
 - 代码位置：`src/agent/agent-event-loop.ts`
 - 硬依赖：[C01](01-event-state.md)、[C02](02-storage-artifacts.md)、[C03](03-permission-engine.md)、[C04](04-budget-controller.md)、[C05](05-model-adapter.md)、[C06](06-context-assembler.md)、[C08](08-tool-runtime.md)、[C09](09-built-in-tools.md)、[C10](10-completion-gate.md)
@@ -208,6 +208,6 @@ idle
 
 DeepSeek 本地价格表版本为 `deepseek-pricing:2026-08-15`，来源是官方 Models & Pricing 页面；未知模型在网络调用前 fail-closed。provider usage 无法按可信价格核对时，用完整 reservation 保守结算并终止 Session，禁止继续付费调用。
 
-完成判断不是模型权威：循环先写 verification facts，检查 C01 trace integrity、至少一个成功只读工具证据，再由 C10 对当前 codeVersion/diffHash 快照验收，最后才写 `completion.claimed -> completion.verified`。确定性 E2E 覆盖完整 replay；真实 DeepSeek 验收仅在显式 `RUN_DEEPSEEK_LIVE=1` 且环境提供 key 时运行，不进入默认 CI。
+完成判断不是模型权威：循环先写 verification facts，以 durable `verification.completed` event ID 建立 system Evidence 并绑定 C10 CodeSnapshot；随后写 `completion.claimed`，从 C01 trace 与新的当前 snapshot 组装可信 GateContext，再由 C10 输出 `completion.verified` 或带稳定 reason codes 的 `completion.rejected`。模型 summary 不成为 trace、安全、operation 或验证事实。确定性 E2E 同时覆盖 verified replay 和 snapshot 漂移后的 rejected replay；真实 DeepSeek 验收仅在显式 `RUN_DEEPSEEK_LIVE=1` 且环境提供 key 时运行，不进入默认 CI。
 
 仍延期：完整 `advance(trigger)` 幂等恢复、approval/user wait、写工具、UNKNOWN reconciliation、no-progress/retry policy、跨进程恢复与 C06 完整 context manifest。特别是进程在 durable begin 后、finish 前崩溃时，会留下 started fact 与 open reservation；当前切片不会自动释放或重试，后续恢复入口必须通过 `listOpenReservations` 与 operation journal 对账后保守 settle/reconcile。上述能力不得由本切片的内存 transcript 冒充完成。

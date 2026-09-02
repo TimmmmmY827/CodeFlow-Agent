@@ -59,7 +59,7 @@ describe("AgentEventLoop read-only vertical slice", () => {
       toolRegistry: registry,
       toolRuntime: runtime,
       journal,
-      completionSnapshotProvider: { capture: async () => ({ codeVersion: CODE_VERSION, diffHash: DIFF_HASH }) },
+      completionSnapshotProvider: snapshotProvider(workspace),
       maxSteps: 4,
       maxOutputTokens: 128,
     });
@@ -103,12 +103,76 @@ describe("AgentEventLoop read-only vertical slice", () => {
       "completion.claimed",
       "completion.verified",
     ]);
+    expect(facts.at(-2)?.payload).toMatchObject({
+      intentSchemaVersion: 1,
+      intentHash: expect.stringMatching(/^sha256:/),
+      evidenceIds: [facts.at(-3)?.eventId],
+    });
+    expect(facts.at(-1)?.payload).toMatchObject({
+      intentSchemaVersion: 1,
+      contextSchemaVersion: 1,
+      gateVersion: "completion-gate:v1",
+      contextHash: expect.stringMatching(/^sha256:/),
+      evidenceSetHash: expect.stringMatching(/^sha256:/),
+    });
     expect(reduceAgentEvents(facts)).toMatchObject({ status: "COMPLETION_VERIFIED", lastSequence: 11, traceComplete: true });
     expect(await ledger.getSnapshot(bundle.session.sessionId)).toMatchObject({
       usage: { steps: 2, toolCalls: 1, inputTokens: 42, outputTokens: 13 },
       reserved: { steps: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0 },
       limitStatus: "within",
     });
+  });
+
+  it("records completion.claimed then completion.rejected when the diff changes after evidence", async () => {
+    const workspace = await createWorkspace();
+    using storage = new SqliteStorageDatabase(":memory:", { clock });
+    const bundle = createBundle(workspace);
+    await sessionRepository(storage).create(bundle);
+    const events = new SqliteEventStore(storage);
+    const ledger = new SqliteBudgetLedger(storage);
+    await ledger.initialize({ sessionId: bundle.session.sessionId, policy, pricingVersion: DEEPSEEK_PRICING_VERSION });
+    const journal = new SqliteExecutionJournal(storage, events, ledger);
+    const registry = new ToolRegistry();
+    registerWorkspaceReadTools(registry);
+    let captures = 0;
+    const loop = new AgentEventLoop(events, {
+      modelAdapter: new ScriptedModelAdapter(),
+      toolRegistry: registry,
+      toolRuntime: new ToolRuntime(registry, new PermissionEngine(), { journal }),
+      journal,
+      completionSnapshotProvider: {
+        capture: async (_workspacePath, configVersion) => ({
+          workspacePath: workspace,
+          codeVersion: CODE_VERSION,
+          diffHash: captures++ === 0 ? DIFF_HASH : `sha256:${"e".repeat(64)}`,
+          configVersion,
+        }),
+      },
+      maxSteps: 4,
+      maxOutputTokens: 128,
+    });
+
+    const result = await loop.runReadonlySession({
+      sessionId: bundle.session.sessionId,
+      taskId: bundle.rootTask.taskId,
+      workspaceId: bundle.session.workspace.workspaceId,
+      authorizationVersion: "authorization:readonly-v1",
+      traceId: bundle.createdEvent.traceId,
+      workspacePath: workspace,
+      codeVersion: CODE_VERSION,
+      diffHash: DIFF_HASH,
+      configVersion: bundle.session.configVersion,
+      goal: bundle.session.goal,
+      signal: new AbortController().signal,
+    });
+
+    expect(result).toMatchObject({ status: "failed", error: { category: "completion_rejected" } });
+    const facts = await events.list(bundle.session.sessionId);
+    expect(facts.slice(-2).map((event) => event.type)).toEqual(["completion.claimed", "completion.rejected"]);
+    expect(facts.at(-1)?.payload).toMatchObject({
+      reasonCodes: expect.arrayContaining(["diff_hash_changed", "evidence_snapshot_mismatch"]),
+    });
+    expect(reduceAgentEvents(facts)).toMatchObject({ status: "RUNNING", lastErrorCategory: "completion_rejected" });
   });
 
   it("cancels before the first paid model attempt and writes terminal facts", async () => {
@@ -130,7 +194,7 @@ describe("AgentEventLoop read-only vertical slice", () => {
       toolRegistry: registry,
       toolRuntime: new ToolRuntime(registry, new PermissionEngine(), { journal }),
       journal,
-      completionSnapshotProvider: { capture: async () => ({ codeVersion: CODE_VERSION, diffHash: DIFF_HASH }) },
+      completionSnapshotProvider: snapshotProvider(workspace),
     });
 
     const result = await loop.runReadonlySession({
@@ -176,7 +240,7 @@ describe("AgentEventLoop read-only vertical slice", () => {
       toolRegistry: registry,
       toolRuntime: new ToolRuntime(registry, new PermissionEngine(), { journal }),
       journal,
-      completionSnapshotProvider: { capture: async () => ({ codeVersion: CODE_VERSION, diffHash: DIFF_HASH }) },
+      completionSnapshotProvider: snapshotProvider(workspace),
       maxOutputTokens: 128,
     });
 
@@ -223,7 +287,7 @@ describe("AgentEventLoop read-only vertical slice", () => {
       toolRegistry: registry,
       toolRuntime: new ToolRuntime(registry, new PermissionEngine(), { journal: finishFailingJournal }),
       journal: finishFailingJournal,
-      completionSnapshotProvider: { capture: async () => ({ codeVersion: CODE_VERSION, diffHash: DIFF_HASH }) },
+      completionSnapshotProvider: snapshotProvider(workspace),
       maxOutputTokens: 128,
     });
 
@@ -320,6 +384,17 @@ async function createWorkspace(): Promise<string> {
 
 function sessionRepository(storage: SqliteStorageDatabase): SqliteSessionRepository {
   return new SqliteSessionRepository(storage, { deletedSessionIdentity: { hasDeletedSessionIdentity: () => false } });
+}
+
+function snapshotProvider(workspace: string) {
+  return {
+    capture: async (_workspacePath: string, configVersion: string) => ({
+      workspacePath: workspace,
+      codeVersion: CODE_VERSION,
+      diffHash: DIFF_HASH,
+      configVersion,
+    }),
+  };
 }
 
 function createBundle(workspace: string): CreateSessionBundle {

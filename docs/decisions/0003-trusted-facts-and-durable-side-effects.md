@@ -21,6 +21,6 @@
 
 - C02 必须提供支持下游 journal 端口的 SQLite 事务和崩溃恢复能力。
 - C03/C04/C07 的版本、批准和预算契约进入 C08 commit fence。
-- `finish_task` 输入从 `CompletionClaim` 改为 `CompletionIntent`；当前可编译基线需在接真实循环前迁移。
+- `finish_task` 输入从 `CompletionClaim` 改为 `CompletionIntent`；C10 已完成该迁移并提供可信 Context 组装边界，通用写任务的模型调度仍由 C11 接线。
 - observer、UI 文本、模型 transcript 和 LLM Judge 都不是事实源。
 - 故障注入必须覆盖 durable begin 前后、execute 响应丢失和 durable finish 失败。

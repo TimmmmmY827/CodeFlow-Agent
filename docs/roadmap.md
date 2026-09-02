@@ -1,6 +1,6 @@
 # 两周 MVP 路线图
 
-> 2026-08-09 覆盖度审查后，生命周期和结构化事件契约已先行修正；`ToolRuntime`、operation hash、`CompletionGate` 与 `finish_task` 契约也已提前建立。它们仍需在 D2–D4 与模型工具调用、真实工具、事件循环和代码快照实现接通，不能仅凭组件存在宣称闭环可用。
+> 当前 `ToolRuntime`、operation hash、可信 `CompletionGateContext`、`finish_task@2` 契约与 CodeSnapshot Provider 已建立；最小只读循环已形成验证—声明—判定事件链。通用写任务、HITL、恢复和外部 Provider 仍需按 D4–D8 依赖门接通，不能用只读切片替代完整闭环验收。
 
 | 日程 | 主组件 | 可验证交付物 |
 | --- | --- | --- |
