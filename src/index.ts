@@ -293,4 +293,11 @@ export {
   registerWorkspaceReadTools,
 } from "./tools/builtin/workspace-read-tools.js";
 export type { WorkspaceReadToolOptions } from "./tools/builtin/workspace-read-tools.js";
+export {
+  createApplyPatchTool,
+  createRunCommandTool,
+  createWorkspaceWriteTools,
+  createWriteFileTool,
+  registerWorkspaceWriteTools,
+} from "./tools/builtin/workspace-write-tools.js";
 export { exportSanitizedTrace } from "./trace/trace-exporter.js";

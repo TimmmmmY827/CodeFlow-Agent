@@ -448,10 +448,15 @@ export class ToolRuntime {
       const cancelled = request.signal.aborted || isAbortError(error);
       const unknownSideEffect = tool.sideEffect !== "none";
       if (error instanceof ToolExecutionError) {
+        const status = error.details.sideEffectStatus === "unknown"
+          ? "unknown"
+          : error.details.category === "cancelled"
+            ? "cancelled"
+            : "failed";
         result = envelope(
           tool.name,
           operationHash,
-          error.details.category === "cancelled" ? "cancelled" : "failed",
+          status,
           durationMs,
           error.details.sideEffectStatus,
           null,
